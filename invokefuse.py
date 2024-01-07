@@ -1,40 +1,63 @@
 #!/usr/bin/env python3
 
 # Motivation: browse the "boards" created by InvokeAI as if they were subdirectories.
-# To extend: do better than that.  I think here's what I'm seeing:
+# To extend: do better than that.  Basically, this is the idea:
 
-# - mnt/
-#   - boards/   # XXXX NO, REMOVE THIS LEVEL.
-#     - UNSORTED/
-#       - models/
-#         - <model1 name>/
-#           - 1/  (might have to use some hash?)
-#             - __PROMPT (file which contains the text of the prompt)
-#             - <image1.png>
-#             - <image2.png>
-#             - <etc...>
-#           - 2/
-#             - (same as 1)
-#           - (etc)/
-#         - <model2 name>/
-#           - (same substructure as model1)...
-#       - prompts/
-#         - 1/
-#           - __PROMPT (file containing text of the prompt)
-#           - <model1 name>/
-#             - <image1.png>
-#             - <image2.png>
-#             - <etc...>
-#           - <model2 name>/
-#             - (same as model1)
-#         - 2/
-#           - (same substructure as 1)...
-#     - <boardname1>/
-#       - (same substructure as UNSORTED)...
-#     - <boardname2>/
-#       - (same substructure as UNSORTED)...
-#     - (etc)/
+# - root/
+#   - UNSORTED
+#     - models
+#       - <model name1>
+#         - <"hashed" prompt1>
+#           - <image1.png>
+#           - <image2.png>
+#           - ...
+#           - PROMPT.txt
+#         - <"hashed" prompt2>
+#           - (as above)
+#         - ...
+#         - NO PROMPT
+#           - (as above)
+#       - <model name2>
+#         - (as above)
+#       - <model name3>
+#         - (as above)
+#       - ...
+#       - NO MODEL
+#         - (as above)
+#   - prompts
+#     - <"hashed" prompt1>
+#       - PROMPT.TXT
+#       - <model name1>
+#         - <image1.png>
+#         - <image2.png>
+#         - ...
+#       - <model name2>
+#         - (as above)
+#       - ...
+#       - NO MODEL
+#         - (as above)
+#     - <"hashed" prompt2>
+#       - (as above)
+#     - ...
+#     - NO PROMPT
+#       - (as above)
+# - <board name1>
+#   - (as above)
+# - <board name2>
+#   - (as above)
+#   - ...
 
+# Using noprompts, nomodels, or noboards in the command-line will replace
+# that level with the reserved word "ALL" and not separate on that level.
+# Don't really need noprompts and all, just use ALL!
+
+# by Mark Shoulson, 2023-2024
+# Still rough!
+
+# Added in dates, though badly.  Only really makes sense if you "skip" the
+# existing levels with "ALL", if you want to skip them.
+
+# How about better prompt searching?
 
 import fuse
 import os
@@ -43,6 +66,7 @@ import sys
 import stat
 import errno
 import tempfile
+import re
 import sqlite3 as sqlite
 from itertools import count
 
@@ -69,14 +93,16 @@ def getParts(path):
         return path.split(os.sep)
 
 # I'm not likely to need THAT big a hash space.
-HASHLEN = 10
+HASHLEN = 9                     # multiple of 3 means no =-padding.
 PROMPTLEN = 20
 import re
 SanityRE = re.compile('[^A-Za-z0-9_]+')
 def makehash(prompt):
-    # Special-case out the NOPROMPT
+    # Special-cases
     if prompt == NOPROMPT:
         return NOPROMPT
+    if prompt == ALL:
+        return ALL
     shk = hashlib.shake_256(prompt.encode('utf-8'))
     ## Eep, can't use b64encode, it has / in it!
     # rv = base64.b64encode(shk.digest(HASHLEN)).decode('utf-8')
@@ -101,11 +127,26 @@ UNSORTED = "UNSORTED"
 # Name for prompt file
 PROMPT = "PROMPT.TXT"
 
+# These should be defined constants
+
+MODELS = "models"
+PROMPTS = "prompts"
+DATES = "dates"
+# User's responsibility not to use this form for board-names!
+datere = re.compile('\\d{4}-\\d{2}-\\d{2}$')
+
+METADATA = ".META"
+
 # Name for no-model models
 NOMODEL = "NO MODEL"
 
 # Name for no-prompt prompts, if any
 NOPROMPT = "NO PROMPT"
+
+# Special token for "ALL"; may be removed from user's sight.
+ALL = "ALL"                     # "*" maybe better?
+
+LIKE = "LIKE"
 
 # Ugh, such a pain.  OK, for reference:
 
@@ -132,10 +173,10 @@ class InvokeOutFS(fuse.Operations):
         self.dbfile = os.path.abspath(self.dbfile)
         try:
             self.connection = sqlite.connect(self.dbfile)
+            self.cursor = self.connection.cursor()
         except sqlite.OperationalError as e:
             print("Error: %s"%e)
             exit(50)
-        self.cursor = self.connection.cursor()
         self.cursor.execute(f"CREATE TEMPORARY VIEW {ImageTbl} as {ImageTbl_cmd};")
         if not getattr(self, "rootdir", None):
             self.rootdir = os.sep.join(self.dbfile.split(os.sep)[:-2])
@@ -157,11 +198,15 @@ class InvokeOutFS(fuse.Operations):
         # {"board": board, "model": model, "promptname": promptname,
         #  "is_dir": boolean, "tree" : ("prompt" or "model")}
         # Leaves out or None what it don't know
+        # print(f"parseelts({pathelts=}) -> ", end="")
         board = None
         model = None
         promptname = None
         is_dir = True
         tree = None
+        list_dates = None
+        day = None
+        like = None
         # I thought this would be a good use (finally) of the match statement.
         # I was wrong.  Forget it.
         # Started with repeated ifs, I think I can nest...
@@ -169,16 +214,52 @@ class InvokeOutFS(fuse.Operations):
         # but it's happening?  Is it causing the problem?
         #if pathelts != [os.sep] and pathelts[0] != '':
         #    pathelts.insert(0, '')
+        # Special casing for dates?  Chop them off the end, too!
+        if pathelts[-1] == DATES:
+            # it's a dir, asking for the dates at whatever level.
+            is_dir = True
+            list_dates=True
+            pathelts = pathelts[:-1]
+        elif datere.match(pathelts[-1]):
+            # it's a dir, asking for the images from that date.  Yes,
+            # only the images, don't get more complicated than that.
+            # It is your responsibility not to name boards with names that
+            # look like dates!  Or else change the RE!
+            is_dir = True
+            day = pathelts[-1]
+            pathelts = pathelts[:-1]
+        elif len(pathelts) > 1 and pathelts[-2] == LIKE:
+            # I think I'll require "like" to be on the next-to-bottom level.
+            # You can never list a dir with LIKE, but it lists prompts
+            # underneath it.
+            like = pathelts[-1]
+            is_dir = True
+            # Chop them off the end.  No, only the LIKE part.
+            # On your head be it if you put "like" in the wrong place.
+            pathelts = pathelts[:-2]
+        # You know what??  No.  You want to use them without a board or a model,
+        # you use ALL.  That's what it's for.
+        # Chop 'em out ANYWHERE the magic term appears!!!
+        pathelts = [_ for _ in pathelts if (_ != DATES and
+                                            not datere.match(_))]
+        try:
+            ind = pathelts.index(LIKE)
+            pathelts.pop(ind)
+            pathelts.pop(ind)   # take out the next element too.
+        except (IndexError,ValueError):
+            pass
         numelts = len(pathelts)
         if numelts >= 2:    # ['', board]
             board = pathelts[1]
             # Otherwise, not much beyond is_dir=True
-            if numelts >= 3:    # ['', board, ("models"|"prompts")]
+            if numelts >= 3:    # ['', board, ("models"|"prompts"|"dates")]
                 tree = pathelts[2]
                 if numelts >= 4: # ['', board, tree, (model|promptname)]
-                    if tree == "models":
+                    if tree == MODELS:
                         model = pathelts[3]
-                    else:
+                    # elif tree == "dates": # dates maybe are very different?
+                    #     pass
+                    else:  #  tree == PROMPTS:
                         promptname = pathelts[3]
                     if numelts >= 5: # ['', board, tree, 1stlev, 2ndlev]
                         if tree == "prompts":
@@ -192,7 +273,8 @@ class InvokeOutFS(fuse.Operations):
                         if numelts > 5:
                             is_dir = False # At the image level now.
         return dict(board=board, model=model, promptname=promptname,
-                    tree=tree, is_dir=is_dir)
+                    tree=tree, is_dir=is_dir, list_dates=list_dates,
+                    day=day, like=like)
 
     def is_directory(self, path=None, pathelts=None):
         if not pathelts:
@@ -212,6 +294,10 @@ class InvokeOutFS(fuse.Operations):
                     self.promptdict[makehash(p)] = p
 
     def getprompt(self, promptname):
+        if promptname == ALL:
+            return ALL
+        if promptname is None:
+            return None
         try:
             return self.promptdict[promptname]
         except KeyError:
@@ -221,7 +307,9 @@ class InvokeOutFS(fuse.Operations):
                 return self.promptdict[promptname]
             except KeyError:
                 # OK to raise here?
-                raise fuse.FuseOSError(fuse.ENOENT) # ?
+                # raise fuse.FuseOSError(errno.ENOENT) # ?
+                # No, maybe it's the full prompt!
+                return promptname
 
     def getattr(self, path, fh=None):
         pe=getParts(path)
@@ -253,6 +341,24 @@ class InvokeOutFS(fuse.Operations):
                 st['st_size'] = len(prompt.encode('utf-8'))
                 return st
             # Otherwise, this is presumably an image file, so a soft link.
+            # UNLESS it's a metadata file!!!
+            if pe[-1].endswith(METADATA):
+                image = pe[-1][:-len(METADATA)]
+                query = "SELECT metadata FROM images WHERE image_name=?;"
+                self.cursor.execute(query, [image])
+                # Yes, this winds up fetching the data when statting and when
+                # reading.  Tough.
+                ss = self.cursor.fetchone()
+                if ss is None:
+                    raise fuse.FuseOSError(errno.ENOENT)
+                st['st_mode'] = stat.S_IFREG | 0o444
+                st['st_nlink'] = 1
+                # ss[0] might still be None, though!
+                if ss[0] is None:
+                    st['st_size'] = 0
+                else:
+                    st['st_size'] = len(ss[0].encode('utf-8'))
+                return st
             st['st_mode']=stat.S_IFLNK | 0o777
             st['st_nlink']=1
             imgname=pe[-1]
@@ -267,7 +373,7 @@ class InvokeOutFS(fuse.Operations):
                 cnt=[0]
             if cnt[0]<1:
                 # self.DBG("File not found.")
-                raise fuse.FuseOSError(fuse.ENOENT)
+                raise fuse.FuseOSError(errno.ENOENT)
         return st
 
     def readlink(self, filename):
@@ -278,31 +384,33 @@ class InvokeOutFS(fuse.Operations):
 
     # Also, maybe for "all" boards (i.e. a combined board)  Possibly a bad idea,
     # unless optional at mount time.
-    def listmodels(self, board, prompt=None):
+    # how about having options "noboards", "noprompts", "nomodels" for which level
+    # is to be left out?  If either prompts or models are left out then that cuts out
+    # the "tree" level at which you choose prompts first or models first.  You can
+    # omit one, two, or all three (which is just a listing of outputs/images I guess).
+    def listmodels(self, board, *, prompt=None):
         # Don't read from model_config; models might have been
         # deleted.  Also, there ARE images with NO MODEL!!  This
         # is okay!
         # OK, be careful.  When prompt is None, don't restrict by prompt
         # at all.  When prompt is NOPROMPT, restrict to having no prompt.
         # Note that this should be REAL PROMPTS and not the hashed promptname!
-        if prompt is None:
-            self.cursor.execute("SELECT DISTINCT "
-                                "json_extract(metadata, '$.model.model_name') "
-                                f"FROM {ImageTbl} "
-                                "where full_board_name=?;", [board])
-        elif prompt == NOPROMPT:
-            self.cursor.execute("SELECT DISTINCT "
-                                "json_extract(metadata, '$.model.model_name') "
-                                f"FROM {ImageTbl} "
-                                "WHERE json_extract(metadata, '$.positive_prompt') IS NULL AND "
-                                "full_board_name=?;", [board])
-        else:
-            self.cursor.execute("SELECT DISTINCT "
-                                "json_extract(metadata, '$.model.model_name') "
-                                f"FROM {ImageTbl} "
-                                "WHERE json_extract(metadata, '$.positive_prompt')=? "
-                                "AND full_board_name=?;",
-                                [prompt, board])
+        # print(f"listmodels({board=}, {prompt=})")
+        if getattr(self, 'nomodels', False):
+            yield ALL
+            return
+        # It's safe to use these f-strings, I'm only including my own
+        # constants.
+        query = f"""SELECT DISTINCT json_extract(metadata, '$.model.model_name')
+        FROM {ImageTbl}
+        WHERE
+        (full_board_name = :boardname OR :boardname = '{ALL}')
+        AND IIF(:prompt IS NULL OR :prompt = '{ALL}', TRUE,
+                IIF(:prompt = '{NOPROMPT}',
+                    json_extract(metadata, '$.positive_prompt') IS NULL,
+                    json_extract(metadata, '$.positive_prompt') = :prompt))
+        """
+        self.cursor.execute(query, {"boardname":board, "prompt":prompt})
         # Maybe I should always yield NOMODEL.
         yield NOMODEL
         while (batch := self.cursor.fetchmany()):
@@ -312,69 +420,95 @@ class InvokeOutFS(fuse.Operations):
                 else:
                     yield r[0]
 
-    def listprompts(self, board, model=None, *, hash=False):
+    def listprompts(self, board, *, model=None, hash=False, like=None):
         # As above, for prompts instead of models.  Let's say this yields
         # REAL PROMPTS and the caller has to hash to promptnames as needed.
         # But for some reason "yield from" works and a for loop that hashes
         # and then yields doesn't.  So I guess hash here, optionally?
-        if model is None:
-            self.cursor.execute("SELECT DISTINCT "
-                                "json_extract(metadata, '$.positive_prompt') "
-                                f"FROM {ImageTbl} "
-                                "WHERE full_board_name=?;", [board])
-        elif model == NOMODEL:
-            self.cursor.execute("SELECT DISTINCT "
-                                "json_extract(metadata, '$.positive_prompt') "
-                                f"FROM {ImageTbl} "
-                                "WHERE json_extract(metadata, '$.model.model_name') is NULL "
-                                "AND full_board_name=?;", [board])
-        else:
-            self.cursor.execute("SELECT DISTINCT "
-                                "json_extract(metadata, '$.positive_prompt') "
-                                f"FROM {ImageTbl} "
-                                "WHERE json_extract(metadata, '$.model.model_name')=? "
-                                "AND full_board_name=?;",
-                                [model, board])
+        # print(f"listprompts({board=}, {model=}, {hash=}, {like=})")
+        if getattr(self, 'noprompts', False):
+            yield ALL
+            return
+        query = f"""SELECT DISTINCT json_extract(metadata, '$.positive_prompt') as prm
+        FROM {ImageTbl}
+        WHERE
+        (full_board_name = :boardname OR :boardname = '{ALL}')
+        AND IIF(:model IS NULL OR :model = '{ALL}', TRUE,
+                IIF(:model = '{NOMODEL}',
+                    json_extract(metadata, '$.model.model_name') IS NULL,
+                    json_extract(metadata, '$.model.model_name') = :model))
+        AND (:like IS NULL OR prm LIKE :like)
+        """
+        self.cursor.execute(query, {"boardname":board,
+                                    "model":model,
+                                    "like":like})
         # Maybe I should yield NOPROMPT no matter what
-        yield NOPROMPT
+        # Not if there's a "like", certainly!  Maybe not in other cases.
+        if not like:
+            yield NOPROMPT
         while (batch := self.cursor.fetchmany()):
             for r in batch:
                 if not r or not r[0]:
                     pass        #  ???? XXXX
                 else:
-                    if hash:
+                    if hash and not like: # like negates hash
                         yield makehash(r[0])
                     else:
                         yield r[0]
 
-    def listimages(self, board, prompt=None, model=None):
+    def listdates(self, **info):
+        # print(f"listdates({info=})")
+        # Just feed it in the info, okay?  Dates are different.
+        # I'm just going to ASSUME list_dates is True, why else are you
+        # calling this?
+        # print(f"listdates(**{info=})")
+        # This actually isn't QUITE accurate, since it doesn't take timezone
+        # vs UTC into account.  But that's close enough.
+        query = f"""SELECT DISTINCT DATE(created_at) FROM {ImageTbl} WHERE
+        (full_board_name = :board OR :board = '{ALL}' OR :board IS NULL) AND
+        IIF(:model IS NULL OR :model = '{ALL}', TRUE,
+            IIF(:model = '{NOMODEL}',
+                json_extract(metadata, '$.model.model_name') IS NULL,
+                json_extract(metadata, '$.model.model_name') = :model)) AND
+        IIF(:prompt IS NULL OR :prompt = '{ALL}', TRUE,
+            IIF(:prompt = '{NOPROMPT}',
+                json_extract(metadata, '$.positive_prompt') IS NULL,
+                json_extract(metadata, '$.positive_prompt') = :prompt))
+        """
+        self.cursor.execute(query, {"board": info.get('board', None),
+                                    "model": info.get('model', None),
+                                    "prompt":
+                                    self.getprompt(info.get('promptname', None))})
+        while (batch := self.cursor.fetchmany()):
+               for r in batch:
+                   if not r or not r[0]:
+                       # XXXX RAISE ERROR?
+                       yield ""
+                   else:
+                       yield r[0]
+
+    def listimages(self, board, *, prompt=None, model=None, day=None):
         # Use REAL PROMPT, and None vs NOMODEL and NOPROMPT as the others.
         # Maybe can be a LITTLE more efficient.
-        # There's also a right way do to THIS in sqlite, isn't there?
-        # And I'm not doing it?
+        # print(f"listimages({board=}, {prompt=}, {model=}, {day=})")
         rprompt = rmodel = ""
-        params=[]
-        if prompt is not None:
-            if prompt == NOPROMPT:
-                rprompt = "json_extract(metadata, '$.positive_prompt') IS NULL"
-            else:
-                rprompt = "json_extract(metadata, '$.positive_prompt') = ?"
-                params.append(prompt)
-        if model is not None:
-            if model == NOMODEL:
-                rmodel = "json_extract(metadata, '$.model.model_name') IS NULL"
-            else:
-                rmodel = "json_extract(metadata, '$.model.model_name') = ?"
-                params.append(model)
-        if rprompt and rmodel:
-            restrict = f"{rprompt} AND {rmodel}"
-        else:
-            restrict = rprompt or rmodel
-        if restrict:
-            restrict = " AND " + restrict
-        self.cursor.execute(f"SELECT image_name from {ImageTbl} WHERE "
-                            f"full_board_name = ?{restrict};",
-                            [board] + params)
+        restrict = "full_board_name=?"
+        query = f"""SELECT image_name FROM {ImageTbl} WHERE
+        (full_board_name = :board OR :board = '{ALL}' OR :board IS NULL) AND
+        IIF(:model IS NULL OR :model = '{ALL}', TRUE,
+            IIF(:model = '{NOMODEL}',
+                json_extract(metadata, '$.model.model_name') IS NULL,
+                json_extract(metadata, '$.model.model_name') = :model)) AND
+        IIF(:prompt IS NULL OR :prompt = '{ALL}', TRUE,
+            IIF(:prompt = '{NOPROMPT}',
+                json_extract(metadata, '$.positive_prompt') IS NULL,
+                json_extract(metadata, '$.positive_prompt') = :prompt)) AND
+        (DATE(created_at) = :day OR :day IS NULL)
+        """
+        self.cursor.execute(query, {"board":board,
+                                    "model":model,
+                                    "prompt":prompt,
+                                    "day":day})
         while (batch := self.cursor.fetchmany()):
                for r in batch:
                    if not r or not r[0]:
@@ -386,20 +520,48 @@ class InvokeOutFS(fuse.Operations):
     def readdir(self, path, offset):
         pe = getParts(path=path)
         info = self.parseelts(pe)
+        # print(info)
+        day = info['day']
         if not info.get('is_dir', False):
-            raise fuse.FuseOSError(fuse.ENOTDIR)
+            raise fuse.FuseOSError(errno.ENOTDIR)
         yield '.'
         yield '..'
-        if self.is_root(path=path):
-            # Always yield the unsorted dir
-            yield UNSORTED
-            self.cursor.execute("SELECT DISTINCT board_name FROM boards;")
-            l = self.cursor.fetchall()
-            for r in l:
-                yield r[0]
+        # "dates" takes precedence over everything, and ONLY yields dates,
+        # with images directly under that!!  No other tree stuff!
+        if info['list_dates']:
+            yield from self.listdates(**info)
             return
+        # Dates always list images, never anything else.
+        # XXXXX AUGH FAIL!  I rely on size of path to determine that these
+        # XXXXX aren't directories!
+        # You know what?  Fine.  Users should be using ALL to skip levels,
+        # not sticking "dates" in the wrong place.
+        if info['day']:
+            if info['promptname']:
+                prompt = self.getprompt(info['promptname'])
+            else:
+                prompt = None
+            yield from self.listimages(board=info['board'], model=info['model'],
+                                       prompt=prompt, day=info['day'])
+            return              # And don't do any more!
+        if self.is_root(path=path):
+            if getattr(self, 'noboards', False):
+                yield ALL
+                return
+            else:
+                # Always yield the unsorted dir
+                yield UNSORTED
+                self.cursor.execute("SELECT DISTINCT board_name FROM boards;")
+                l = self.cursor.fetchall()
+                for r in l:
+                    # What if a board name has a '/' in it???  User's problem.
+                    yield r[0]
+                return
         # we SHOULD have the board at this point.
         board = info.get('board', None)
+        restrict = "full_board_name=?"
+        if board == ALL:
+            restrict = "TRUE OR " + restrict
         if board is None:
             # Problem, right?
             raise fuse.FuseOSError(ENOENT) # ??
@@ -408,16 +570,16 @@ class InvokeOutFS(fuse.Operations):
             # the board and that's the level we're on.
             # Confirm that it exists this time?
             self.cursor.execute(f"SELECT count(*) FROM {ImageTbl} "
-                                "WHERE full_board_name=?;",
+                                f"WHERE {restrict};",
                                 [board])
             res = self.cursor.fetchone()
             if res[0] <= 0:
-                raise fuse.FuseOSError(fuse.ENOENT) # ?
+                raise fuse.FuseOSError(errno.ENOENT) # ?
             # We're at the tree level, so the only things to
             # return are the two possible trees:
-            yield "models"
-            yield "prompts"
-        elif info['tree'] == "models":
+            yield MODELS
+            yield PROMPTS
+        elif info['tree'] == MODELS:
             # We're in one of two branches now: prompts or models.  If we
             # know one but not the other, list the other.  If we know
             # neither, list the one we don't know.
@@ -430,47 +592,67 @@ class InvokeOutFS(fuse.Operations):
                     # output the PROMPT file too.
                     prompt = self.getprompt(promptname) # XXX exception here?
                     yield PROMPT
-                    yield from self.listimages(board, model=model, prompt=prompt)
+                    yield from self.listimages(board, model=model, prompt=prompt, day=day)
                 else:
                     # we know the model but not the prompts.  I think we
                     # *should* restrict to prompts that are actually found
                     # in that model.
-                    for p in self.listprompts(board, model):
-                        yield makehash(p)
+                    yield from self.listprompts(board, model=model, hash=True,
+                                                like=info['like'])
             else:
                 # We are in models tree, but don't know the model;
                 # have to list those.
+                if getattr(self, 'nomodels', False):
+                    yield ALL
+                    return          # ???
                 yield from self.listmodels(board)
-        elif info['tree'] == 'prompts':
+        elif info['tree'] == PROMPTS:
             if (prompt := info.get('promptname', None)):
                 if prompt != NOPROMPT:
                     prompt = self.getprompt(prompt) # raises error here?  probably wrong?
                 # Are we at the bottom now?
                 if (model := info.get('model', None)):
-                    yield from self.listimages(board, model=model, prompt=prompt)
+                    yield from self.listimages(board, model=model,
+                                               prompt=prompt, day=day)
                 else:
                     # Have to list the models for this prompt.
                     # Also the PROMPT entry!
                     yield PROMPT
-                    yield from self.listmodels(board, prompt)
+                    yield from self.listmodels(board, prompt=prompt)
             else:
+                if getattr(self, 'noprompts', False):
+                    yield ALL
+                    return          # ???
                 # Need to list the prompts, but hashed!
-                for p in self.listprompts(board):
-                    yield makehash(p)
+                yield from self.listprompts(board, hash=True, like=info['like'])
 
-    # I actually have to have a read() for the prompt.
+    # I actually have to have a read() for the prompt and metdata
 
     def read(self, path, size, offset, fh):
         # What's the FH?
         pe = getParts(path)
         info = self.parseelts(pe)
         if info.get("is_dir", False):
-            raise fuse.FuseOSError(fuse.EISDIR)
-        if not info.get("promptname", None) or pe[-1] != PROMPT:
-            raise fuse.FuseOSError(fuse.EBADF) # ?
-        prompt = self.getprompt(info['promptname'])
-        bprompt = prompt.encode('utf8')
-        return bprompt[offset:offset+size]
+            raise fuse.FuseOSError(errno.EISDIR)
+        if info.get("promptname", None) and pe[-1] == PROMPT:
+            prompt = self.getprompt(info['promptname'])
+            bprompt = prompt.encode('utf8')
+            return bprompt[offset:offset+size]
+        elif pe[-1].endswith(METADATA):
+            img = pe[-1][:-len(METADATA)]
+            self.cursor.execute("SELECT metadata FROM images WHERE image_name = ?;",
+                                [img])
+            ss = self.cursor.fetchone()
+            if ss is None:
+                raise fuse.FuseOSError(errno.EBADF)
+            # Could still have ss[0] being None.
+            if ss[0] is None:
+                val = b""
+            else:
+                val = ss[0].encode('utf8')
+            return val[offset:offset+size]
+        else:
+            raise fuse.FuseOSError(errno.EBADF) # ?
 
     mknod = unlink = write = mkdir = release = open = truncate = utime = None
 
@@ -481,8 +663,12 @@ class InvokeOutFS(fuse.Operations):
 
 def usage():
     print(f"""
-    -o dbfile=$PWD/databases/invokeai.db
+    -o dbfile=$PWD/databases/invokeai.db ~/mnt
+
+    options include noboards, noprompts, nomodels, and foreground.
     """)
+
+    # nomodels and stuff aren't all that useful; you can just use ALL in the path anyway.
 
 if __name__ == '__main__':
     server = InvokeOutFS()

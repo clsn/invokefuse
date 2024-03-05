@@ -18,10 +18,10 @@ It's probably simplest just to run it from your InvokeAI installation directory:
 
 The basic directory structure as presented by InvokeFuse works like this (I started to draw a diagram but it just got ridiculous.)  See also below, though, about [[*Unlisted Entries][Unlisted Entries]].
 
-*** Boards
+*** Level 1: Boards
 The top level, directly under the mount point, consists of directories named for each of the "boards" you have created in InvokeAI.  There is also a special directory called =UNSORTED/= for the "Uncategorized" section, where InvokeAI puts images that you haven't assigned to any of the boards.  (See the [[*Caveats][Caveats]] section for warnings about board names.)
 
-**** =models= or =prompts=
+**** Level 2: =models= or =prompts=
 The second level is fixed, and always contains the exact same two "subdirectories."  I was sort of hesitating between how to order things and wound up doing both.  The basic idea in my mind when I was starting out was that I wanted to access images by the (positive) prompt used and by the model used to generate them, but I wasn't sure which one of those was primary.  So I ended up doing both, and you can choose to have paths that look like
 
 : <boardname>/models/<modelname>/<prompt>/003b9609-ce8d-4671-b59c-052859349a01.png
@@ -38,7 +38,7 @@ as well as
 
 : myArt/prompts/'happy people-FS+YQH1pnb5W'/juggernaut/003b9609-ce8d-4671-b59c-052859349a01.png
 
-***** Modelname or Promptname subdirectories
+***** Level 3: Modelname or Promptname subdirectories
 
 At this level, one below choosing "models" or "prompts", you have subdirectories named for each model used to generate images in the given board, or subdirectories named for each prompt used to generate images in the given board (depending on which you chose in the parent directory.)
 
@@ -48,13 +48,13 @@ In the "prompts" case, there is similarly a =NO PROMPT/= subdirectory for image
 
 But using prompts as directory names raises some awkwardness, because prompts can be very long and can contain funny characters and that can make them hard to read and type.  So I just truncate the prompt and hope that the /start/ of the prompt is meaningful to you.  Actually, first I preprocess the prompt: I strip out anything that isn't an ASCII letter, number, or underscore (=[A-Za-z0-9_]=), replacing any string of such characters with a single space, and then I strip off leading and trailing spaces.  Then I use the first 20 characters of the resulting string, hoping that is meaningful enough to you.  Because that preprocessing could easily result in distinct prompts boiling down to the same prefix, I also add a disambiguating suffix (after a =-= character), made of a 9-byte hash of the whole prompt (before processing) encoded into ASCII.  I use a short hash so that the suffix isn't too long, and because I figure even with a "small" hash space (2^{72}), it's very unlikely that there will be collisions and it isn't like we're protecting valuable secrets that need foolproof cryptographic hashing.  That's why the examples above showed prompts with that string of nonsense characters at the end: those were the hash.
 
-****** Promptname or Modelname subdirectories
+****** Level 4: Promptname or Modelname subdirectories
 
 This level is (almost) exactly the same as the one above it, except that it does the other one of the two initial choices.  So if you're in the =models/= branch and the level above this one was directories of model-names, this will be a directory of (truncated and hashed) prompts that were used in this board for that model.  And if you're in the =prompts/= branch and the level above this one was directories of prompts, this level will be directories of model-names that were used for the given board with the given model.  In the same way, there will be a =NO PROMPT/= or =NO MODEL/= subdirectory here.
 
 There is one small difference, though.  Only in the case where you're in the =prompts/= branch and so the parent directory chose the prompt, in its abbreviated form, there will also be a file here called =PROMPT.TXT= which contains the actual text of the prompt, unprocessed.  This way you can check if you're in the right place, in case the preprocessing obscured the distinctions between prompts.  This is a normal file, you can read it with all normal tools.
 
-******* Image links
+******* Level 5: Image links
 
 Finally, this is the bottom layer.  At this layer reside all the images you created in the given board, with the given model, with the given prompt.  The images exist here as /symbolic links/ to the actual images in the =outputs/images/= directory of InvokeAI, to the extent that matters, but for most intents and purposes they'll behave as the images, and you can display them etc.
 

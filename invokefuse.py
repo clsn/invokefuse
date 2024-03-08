@@ -285,8 +285,11 @@ class InvokeOutFS(fuse.Operations):
     def getpromptnames(self):
         # Populate/refresh the self.promptdict library.
         self.promptdict.clear()
-        self.cursor.execute("select distinct "
-                            "json_extract(metadata, '$.positive_prompt') from images;")
+        self.cursor.execute("""select distinct
+                            " replace(
+                                 json_extract(metadata,
+                                             '$.positive_prompt'),
+                                '/', ' ') from images;""")
         while (batch := self.cursor.fetchmany()):
             for item in batch:
                 p = item[0]
@@ -408,8 +411,12 @@ class InvokeOutFS(fuse.Operations):
         AND IIF(:prompt IS NULL OR :prompt = '{ALL}', TRUE,
                 IIF(:prompt = '{NOPROMPT}',
                     json_extract(metadata, '$.positive_prompt') IS NULL,
-                    json_extract(metadata, '$.positive_prompt') = :prompt))
+                    replace(
+                        json_extract(metadata, '$.positive_prompt'),
+                        '/', ' ') = :prompt))
         """
+        if prompt:
+            prompt = prompt.replace('/', ' ')
         self.cursor.execute(query, {"boardname":board, "prompt":prompt})
         # Maybe I should always yield NOMODEL.
         yield NOMODEL
@@ -429,7 +436,8 @@ class InvokeOutFS(fuse.Operations):
         if getattr(self, 'noprompts', False):
             yield ALL
             return
-        query = f"""SELECT DISTINCT json_extract(metadata, '$.positive_prompt') as prm
+        query = f"""SELECT DISTINCT
+            replace(json_extract(metadata, '$.positive_prompt'), '/', ' ') as prm
         FROM {ImageTbl}
         WHERE
         (full_board_name = :boardname OR :boardname = '{ALL}')
@@ -473,7 +481,8 @@ class InvokeOutFS(fuse.Operations):
         IIF(:prompt IS NULL OR :prompt = '{ALL}', TRUE,
             IIF(:prompt = '{NOPROMPT}',
                 json_extract(metadata, '$.positive_prompt') IS NULL,
-                json_extract(metadata, '$.positive_prompt') = :prompt))
+                replace(json_extract(metadata,
+                                     '$.positive_prompt'), '/', ' ') = :prompt))
         """
         self.cursor.execute(query, {"board": info.get('board', None),
                                     "model": info.get('model', None),
@@ -502,9 +511,12 @@ class InvokeOutFS(fuse.Operations):
         IIF(:prompt IS NULL OR :prompt = '{ALL}', TRUE,
             IIF(:prompt = '{NOPROMPT}',
                 json_extract(metadata, '$.positive_prompt') IS NULL,
-                json_extract(metadata, '$.positive_prompt') = :prompt)) AND
+                replace(json_extract(metadata,
+                            '$.positive_prompt'),'/',' ') = :prompt)) AND
         (DATE(created_at) = :day OR :day IS NULL)
         """
+        if prompt:
+            prompt = prompt.replace('/', ' ')
         self.cursor.execute(query, {"board":board,
                                     "model":model,
                                     "prompt":prompt,
@@ -626,7 +638,7 @@ class InvokeOutFS(fuse.Operations):
                 # Need to list the prompts, but hashed!
                 yield from self.listprompts(board, hash=True, like=info['like'])
 
-    # I actually have to have a read() for the prompt and metdata
+    # I actually have to have a read() for the prompt and metadata
 
     def read(self, path, size, offset, fh):
         # What's the FH?

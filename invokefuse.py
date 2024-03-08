@@ -286,7 +286,7 @@ class InvokeOutFS(fuse.Operations):
         # Populate/refresh the self.promptdict library.
         self.promptdict.clear()
         self.cursor.execute("""select distinct
-                            " replace(
+                                replace(
                                  json_extract(metadata,
                                              '$.positive_prompt'),
                                 '/', ' ') from images;""")

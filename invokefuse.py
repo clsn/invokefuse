@@ -164,7 +164,7 @@ LIKE = "LIKE"
 # It's SOO much simpler just to make an "UNSORTED" board than to hassle
 # with the IS NULL situation.
 
-ImageTbl_cmd = f"select images.*, board_images.board_id, board_name, coalesce(board_name, '{UNSORTED}') as full_board_name from images left join board_images on images.image_name=board_images.image_name left join boards on board_images.board_id=boards.board_id"
+ImageTbl_cmd = f"""select images.*, board_images.board_id, board_name, coalesce(board_name, '{UNSORTED}') as full_board_name, json_extract(metadata, '$.positive_prompt') as positive_prompt, json_extract(metadata, '$.model.model_name') as model_name from images left join board_images on images.image_name=board_images.image_name left join boards on board_images.board_id=boards.board_id"""
 
 ImageTbl = "all_images_boards"
 
@@ -404,15 +404,15 @@ class InvokeOutFS(fuse.Operations):
             return
         # It's safe to use these f-strings, I'm only including my own
         # constants.
-        query = f"""SELECT DISTINCT json_extract(metadata, '$.model.model_name')
+        query = f"""SELECT DISTINCT model_name
         FROM {ImageTbl}
         WHERE
         (full_board_name = :boardname OR :boardname = '{ALL}')
         AND IIF(:prompt IS NULL OR :prompt = '{ALL}', TRUE,
                 IIF(:prompt = '{NOPROMPT}',
-                    json_extract(metadata, '$.positive_prompt') IS NULL,
+                    positive_prompt IS NULL,
                     replace(
-                        json_extract(metadata, '$.positive_prompt'),
+                        positive_prompt,
                         '/', ' ') = :prompt))
         """
         if prompt:
@@ -437,14 +437,14 @@ class InvokeOutFS(fuse.Operations):
             yield ALL
             return
         query = f"""SELECT DISTINCT
-            replace(json_extract(metadata, '$.positive_prompt'), '/', ' ') as prm
+            replace(positive_prompt, '/', ' ') as prm
         FROM {ImageTbl}
         WHERE
         (full_board_name = :boardname OR :boardname = '{ALL}')
         AND IIF(:model IS NULL OR :model = '{ALL}', TRUE,
                 IIF(:model = '{NOMODEL}',
-                    json_extract(metadata, '$.model.model_name') IS NULL,
-                    json_extract(metadata, '$.model.model_name') = :model))
+                    model_name IS NULL,
+                    model_name = :model))
         AND (:like IS NULL OR prm LIKE :like)
         """
         self.cursor.execute(query, {"boardname":board,
@@ -476,13 +476,12 @@ class InvokeOutFS(fuse.Operations):
         (full_board_name = :board OR :board = '{ALL}' OR :board IS NULL) AND
         IIF(:model IS NULL OR :model = '{ALL}', TRUE,
             IIF(:model = '{NOMODEL}',
-                json_extract(metadata, '$.model.model_name') IS NULL,
-                json_extract(metadata, '$.model.model_name') = :model)) AND
+                model_name IS NULL,
+                model_name = :model)) AND
         IIF(:prompt IS NULL OR :prompt = '{ALL}', TRUE,
             IIF(:prompt = '{NOPROMPT}',
-                json_extract(metadata, '$.positive_prompt') IS NULL,
-                replace(json_extract(metadata,
-                                     '$.positive_prompt'), '/', ' ') = :prompt))
+                positive_prompt IS NULL,
+                replace(positive_prompt, '/', ' ') = :prompt))
         """
         self.cursor.execute(query, {"board": info.get('board', None),
                                     "model": info.get('model', None),
@@ -506,13 +505,12 @@ class InvokeOutFS(fuse.Operations):
         (full_board_name = :board OR :board = '{ALL}' OR :board IS NULL) AND
         IIF(:model IS NULL OR :model = '{ALL}', TRUE,
             IIF(:model = '{NOMODEL}',
-                json_extract(metadata, '$.model.model_name') IS NULL,
-                json_extract(metadata, '$.model.model_name') = :model)) AND
+                model_name IS NULL,
+                model_name = :model)) AND
         IIF(:prompt IS NULL OR :prompt = '{ALL}', TRUE,
             IIF(:prompt = '{NOPROMPT}',
-                json_extract(metadata, '$.positive_prompt') IS NULL,
-                replace(json_extract(metadata,
-                            '$.positive_prompt'),'/',' ') = :prompt)) AND
+                positive_prompt IS NULL,
+                replace(positive_prompt,'/',' ') = :prompt)) AND
         (DATE(created_at) = :day OR :day IS NULL)
         """
         if prompt:

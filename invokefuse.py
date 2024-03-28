@@ -164,7 +164,7 @@ LIKE = "LIKE"
 # It's SOO much simpler just to make an "UNSORTED" board than to hassle
 # with the IS NULL situation.
 
-ImageTbl_cmd = f"""select images.*, board_images.board_id, board_name, coalesce(board_name, '{UNSORTED}') as full_board_name, json_extract(metadata, '$.positive_prompt') as positive_prompt, json_extract(metadata, '$.model.model_name') as model_name from images left join board_images on images.image_name=board_images.image_name left join boards on board_images.board_id=boards.board_id"""
+ImageTbl_cmd = f"""select images.*, board_images.board_id, board_name, coalesce(board_name, '{UNSORTED}') as full_board_name, json_extract(metadata, '$.positive_prompt') as positive_prompt, coalesce(json_extract(metadata, '$.model.model_name'), models.name, json_extract(metadata, '$.model.key')) as model_name from images left join board_images on images.image_name=board_images.image_name left join boards on board_images.board_id=boards.board_id left join models on json_extract(metadata, '$.model.key')=models.id"""
 
 ImageTbl = "all_images_boards"
 
@@ -177,6 +177,15 @@ class InvokeOutFS(fuse.Operations):
         except sqlite.OperationalError as e:
             print("Error: %s"%e)
             exit(50)
+        # Invoke 3.x does not have a models table.
+        # CREATE TEMP TABLE IF NOT EXISTS doesn't work.
+        self.cursor.execute("""SELECT count(*) FROM sqlite_master
+                            WHERE type='table' and name='models';""")
+        r = self.cursor.fetchone()
+        if not r or r[0] < 1:
+            # Temp tables don't write to the DB file either.
+            self.cursor.execute("""CREATE TEMPORARY TABLE
+                            models (key text, id text, name text);""")
         self.cursor.execute(f"CREATE TEMPORARY VIEW {ImageTbl} as {ImageTbl_cmd};")
         if not getattr(self, "rootdir", None):
             self.rootdir = os.sep.join(self.dbfile.split(os.sep)[:-2])
@@ -364,6 +373,8 @@ class InvokeOutFS(fuse.Operations):
                 return st
             st['st_mode']=stat.S_IFLNK | 0o777
             st['st_nlink']=1
+            # Set the date stuff on the link?  The user can always just
+            # add `-L` to the ls command...
             imgname=pe[-1]
             st['st_size'] = len(imgname)
             # print(" IZImg ({0})".format(imgname))

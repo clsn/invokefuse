@@ -185,6 +185,8 @@ class InvokeOutFS(fuse.Operations):
         self.cursor.execute(f"CREATE TEMPORARY VIEW {ImageTbl} as {ImageTbl_cmd};")
         if not getattr(self, "rootdir", None):
             self.rootdir = os.sep.join(self.dbfile.split(os.sep)[:-2])
+        if not getattr(self, 'imagesdir', None):
+            self.imagesdir = os.sep.join([self.rootdir, "outputs", "images"])
         self.promptdict = {}
         self.indent=0
 
@@ -399,7 +401,7 @@ class InvokeOutFS(fuse.Operations):
         return st
 
     def imgfile(self, name):
-        return os.sep.join([self.rootdir, "outputs", "images", name])
+        return os.sep.join([self.imagesdir, name])
 
     def readlink(self, filename):
         # print("RdLink: ({0!r} ({1!r})".format(filename, self.rootdir))
@@ -683,7 +685,13 @@ def usage():
     print(f"""
     -o dbfile=$PWD/databases/invokeai.db ~/mnt
 
-    options include 'foreground', 'allow_other'.
+    options include 'foreground', 'allow_other',
+    'imagesdir=ABSOLUTEPATH',   (where your images are)
+    'rootdir=ABSOLUTEPATH'.     (root dir for invoke)
+
+    If rootdir is not specified, it is taken to be one level above the directory
+    where the dbfile is.  If imagesdir is not specified, it is taken to be
+    "rootdir/outputs/images".
     """)
 
 if __name__ == '__main__':

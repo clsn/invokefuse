@@ -47,10 +47,6 @@
 #   - (as above)
 #   - ...
 
-# Using noprompts, nomodels, or noboards in the command-line will replace
-# that level with the reserved word "ALL" and not separate on that level.
-# Don't really need noprompts and all, just use ALL!
-
 # by Mark Shoulson, 2023-2024
 # Still rough!
 
@@ -396,12 +392,6 @@ class InvokeOutFS(fuse.Operations):
         name = pe[-1]
         return os.sep.join([self.rootdir, "outputs", "images", name])
 
-    # Also, maybe for "all" boards (i.e. a combined board)  Possibly a bad idea,
-    # unless optional at mount time.
-    # how about having options "noboards", "noprompts", "nomodels" for which level
-    # is to be left out?  If either prompts or models are left out then that cuts out
-    # the "tree" level at which you choose prompts first or models first.  You can
-    # omit one, two, or all three (which is just a listing of outputs/images I guess).
     def listmodels(self, board, *, prompt=None):
         # Don't read from model_config; models might have been
         # deleted.  Also, there ARE images with NO MODEL!!  This
@@ -410,9 +400,6 @@ class InvokeOutFS(fuse.Operations):
         # at all.  When prompt is NOPROMPT, restrict to having no prompt.
         # Note that this should be REAL PROMPTS and not the hashed promptname!
         # print(f"listmodels({board=}, {prompt=})")
-        if getattr(self, 'nomodels', False):
-            yield ALL
-            return
         # It's safe to use these f-strings, I'm only including my own
         # constants.
         query = f"""SELECT DISTINCT model_name
@@ -444,9 +431,6 @@ class InvokeOutFS(fuse.Operations):
         # But for some reason "yield from" works and a for loop that hashes
         # and then yields doesn't.  So I guess hash here, optionally?
         # print(f"listprompts({board=}, {model=}, {hash=}, {like=})")
-        if getattr(self, 'noprompts', False):
-            yield ALL
-            return
         query = f"""SELECT DISTINCT
             replace(positive_prompt, '/', ' ') as prm
         FROM {ImageTbl}
@@ -566,18 +550,14 @@ class InvokeOutFS(fuse.Operations):
                                        prompt=prompt, day=info['day'])
             return              # And don't do any more!
         if self.is_root(path=path):
-            if getattr(self, 'noboards', False):
-                yield ALL
-                return
-            else:
-                # Always yield the unsorted dir
-                yield UNSORTED
-                self.cursor.execute("SELECT DISTINCT board_name FROM boards;")
-                l = self.cursor.fetchall()
-                for r in l:
-                    # What if a board name has a '/' in it???  User's problem.
-                    yield r[0]
-                return
+            # Always yield the unsorted dir
+            yield UNSORTED
+            self.cursor.execute("SELECT DISTINCT board_name FROM boards;")
+            l = self.cursor.fetchall()
+            for r in l:
+                # What if a board name has a '/' in it???  User's problem.
+                yield r[0]
+            return
         # we SHOULD have the board at this point.
         board = info.get('board', None)
         restrict = "full_board_name=?"
@@ -623,9 +603,6 @@ class InvokeOutFS(fuse.Operations):
             else:
                 # We are in models tree, but don't know the model;
                 # have to list those.
-                if getattr(self, 'nomodels', False):
-                    yield ALL
-                    return          # ???
                 yield from self.listmodels(board)
         elif info['tree'] == PROMPTS:
             if (prompt := info.get('promptname', None)):
@@ -641,10 +618,6 @@ class InvokeOutFS(fuse.Operations):
                     yield PROMPT
                     yield from self.listmodels(board, prompt=prompt)
             else:
-                if getattr(self, 'noprompts', False):
-                    yield ALL
-                    return          # ???
-                # Need to list the prompts, but hashed!
                 yield from self.listprompts(board, hash=True, like=info['like'])
 
     # I actually have to have a read() for the prompt and metadata
@@ -686,10 +659,8 @@ def usage():
     print(f"""
     -o dbfile=$PWD/databases/invokeai.db ~/mnt
 
-    options include noboards, noprompts, nomodels, and foreground.
+    options include 'foreground', 'allow_other'.
     """)
-
-    # nomodels and stuff aren't all that useful; you can just use ALL in the path anyway.
 
 if __name__ == '__main__':
     server = InvokeOutFS()
@@ -714,6 +685,7 @@ if __name__ == '__main__':
                 val = True
             setattr(server, nam, val)
     mntpt = os.path.abspath(sys.argv[1])
-    fu = fuse.FUSE(server, mntpt, foreground=hasattr(server,'foreground'),
-                   nothreads=True)
+    fu = fuse.FUSE(server, mntpt, foreground=getattr(server, 'foreground', False),
+                   nothreads=True, allow_other=getattr(server, 'allow_other', False),
+                   allow_root=getattr(server, 'allow_root', False))
 

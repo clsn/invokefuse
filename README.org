@@ -6,6 +6,8 @@ InvokeFuse is a [[https://en.wikipedia.org/wiki/Filesystem_in_Userspace][Filesys
 
 It sort of accreted features here and there, and doesn't necessarily confirm that you're accessing things the way it expects, so it is fairly easy to wind up trying to access a path that gives you unexpected or erroneous results, but if you keep within its limits you should get expected results.  In /no case/ should InvokeFuse ever actually mess up your InvokeAI database; it does not write anything there.
 
+Please /read these docs/.  At least the [[*Directory Structure][Directory Structure]] section.  They aren't that long, and things will be all confusing and won't work as you expect until you update your expectations with knowledge.
+
 ** Running InvokeFuse
 
 It's probably simplest just to run it from your InvokeAI installation directory:
@@ -14,9 +16,19 @@ It's probably simplest just to run it from your InvokeAI installation directory:
 
 (You should create a =mnt/= subdirectory there to mount it.)  Basically, you need to give it a path to the =invokeai.db= file in the =dbfile= option.  Make sure it is an /absolute/ path.  FUSE does not do so well with relative paths (but InvokeFuse will convert the =./mnt= mountpoint to absolute form.)  InvokeFuse presumes that the images are present where InvokeAI generally stores them relatively to the database, that is, in =../outputs/images= relative to the directory where the database is.
 
+See also the [[*Options][Options]] section for how to proceed if your files are someplace else, and for other important behavior-changing options.
+
+*** Unmounting
+
+On Linux, use the =fusermount -u= command to unmount the directory.  Mac and WSL I think use the normal =umount= command (note spelling!)  You won't be able to unmount the directory if any process is still using it.  This includes having files open there or even having a directory in it as its current working directory.  The =fuser -m= command (may not exist on WSL) can tell you which processes are still using the mounted filesystem.
+
 ** Directory Structure
 
-The basic directory structure as presented by InvokeFuse works like this (I started to draw a diagram but it just got ridiculous.)  See also below, though, about [[*Unlisted Entries][Unlisted Entries]].
+The basic directory structure as presented by InvokeFuse works like this (I started to draw a diagram but it just got ridiculous.)  Note that the structure is pretty rigid, and you are expected not to skip levels.  To see all the images in a board, for example, you need to look at something like
+
+: mnt/<boardname>/models/ALL/ALL/
+
+See also below, though, about [[*Unlisted Entries][Unlisted Entries]].
 
 *** Level 1: Boards
 The top level, directly under the mount point, consists of directories named for each of the "boards" you have created in InvokeAI.  There is also a special directory called =UNSORTED/= for the "Uncategorized" section, where InvokeAI puts images that you haven't assigned to any of the boards.  (See the [[*Caveats][Caveats]] section for warnings about board names.)
@@ -96,6 +108,30 @@ See also under [[*Lack of Error/Structure Checking][Caveats]]: using =LIKE/*= in
 
 Any place in a path where you are normally expected to have some value that limits to a particular board or model or prompt, you can substitute the special word =ALL= (all-caps) to sort of "skip" that level and take all of the options.  So =ALL/= at the top level means all of the boards, =ALL/models/ALL/= contains subdirectories for all the prompts you used for any board and any model, and so on.  (Note that the second level, "models" or "prompts", cannot be skipped with =ALL/=, because it would make no sense as the two trees are redundant to one another.)  It is important to use =ALL/= to skip levels (and not try just omitting them to put =dates/= or =LIKE/= someplace) because leaving it out can confuse InvokeFuse and you can wind up with image-names being listed as directories and so on.  See under [[*Lack of Error/Structure Checking][Caveats]].
 
+** Options
+
+As with any mount type command, options for InvokeFuse go in the =-o= option:
+
+: python3 ./invokefuse.py -o dbfile="$PWD"/databases/invokeai.db,foreground,imagesdir=/otherdisk/images,real_files ./mnt
+
+(/not/ like most applications where options are given as =--option= or something).  The options follow the =-o= option (after a space), and are separated by commas /but not spaces/, otherwise the shell will consider it a separate command-line argument and InvokeFuse will probably try to interpret it as the mount-point.  Any spaces in the arguments (/e.g./, in pathnames) must be quoted, hence the use of double-quotes around =$PWD= in the example above.  (There isn't a good way to handle pathnames that contain commas; just avoid those.)  Options are either standalone or take a value with an ~=~ sign.
+
+*** Options supported
+
+ + =dbfile=PATH= :: The one mandatory option.  Provide the path to the =invokeai.db= file that you are using.  This must be an /absolute/ path (not a relative path).  Make sure you quote any spaces that might be in the pathname.
+
+ + =foreground= :: Standalone FUSE option.  If provided, the FUSE system runs in the foreground and does not fork off immediately to become a background process.  This can be useful for debugging, since normal FUSE processes can't write to a visible standard output or error stream, so debug statements aren't helpful, and even exceptions don't show on the console.  But when running in "foreground" mode (even if you use =&= on the command to run it in the background like you can with any command), at least you can see the exceptions and any print statements, etc.
+
+ + =allow_other= :: Standalone FUSE option.  Normally, a FUSE-mounted filesystem is accessible /only/ by the user who mounted it (not even the root user can access it.)  The =allow_other= option allows other users to see and read the filesystem.  This may be important especially if you are browsing over a network connection, etc.  For security reasons, FUSE can only do this if it is explicitly allowed in the system FUSE configuration file, =/etc/fuse.conf=.  You'll need to make sure a line =users_allow_other= is in that file.
+
+ + =allow_root= :: Standalone FUSE option.  This is like =allow_other=, except it only allows the root (administrator) user access to the mounted file-system.
+
+ + =rootdir=PATH= :: The directory that is the root of your InvokeAI installation.  If not provided, it is presumed to be one level up from the directory where the =dbfile= is.  That is, if your dbfile is =/mnt/d/invoke/databases/invokeai.db=, then rootdir is =/mnt/d/invoke=, which is what you would expect.  If you specify this, it should be an absolute path.
+
+ + =imagesdir=PATH= :: The output directory where all your images are located.  If not provided, it is presumed to be =<rootdir>/outputs/images=, which is how InvokeAI organizes things normally.  This is useful if you store your images on a different disk or something for space purposes.  As with the other paths, this should be an absolute path.
+
+ + =real_files= :: Standalone option.  Operate in "real files" mode.  Normally, the actual images are presented as symbolic links to the actual image files.  But it seems that Windows systems don't process symbolic links well, so the =real_files= option makes InvokeFuse try to present the images as actual files and handle reading from them, etc, so as to make it usable with Windows.  This may cause some small performance degradation, and there might also be other issues with it that we don't know about yet.
+
 ** Caveats
 
 This project was sort of thrown together, and there is a lot of error-checking and due diligence with inputs that is /not/ being done.  The user expected to use things correctly and not to provide opportunities for mishaps.
@@ -133,3 +169,6 @@ The structure of a path to an image is =<board>/models/<model>/<prompt>/<image.p
 *** Dates and Timezones
 
 At the moment, the dating used by the =dates/= subdirectory is not timezone-aware, so the images which it says were created on =2024-01-05= are those which were created then /in UTC/, not local time.  So some of the ones you thought you made on that day might show up in the previous or next day's directory, depending on your timezone.
+
+** Use with Windows
+InvokeFuse was developed on a Linux system, using FUSE capabilities which Windows doesn't really support natively, so you might have some issues with using it.  I have heard that it /can/ be used with the [[https://learn.microsoft.com/en-us/windows/wsl/install][WSL environment]], which essentially provides you with a Linux-like environment in Windows.  You'll need to =sudo apt install fuse= in your WSL environment to make sure you have FUSE support installed.  When the docs here call for an "absolute path", you probably are going to need to use the WSL-style path (=/mnt/d/invokeai/databases/invokeai.db= or something).  To access the filesystem from outside WSL, you'll need to make sure that =allow_others= is specified, and that it's permitted in your =/etc/fuse.conf= file, so that external tools can see it.

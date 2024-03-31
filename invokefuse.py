@@ -367,13 +367,9 @@ class InvokeOutFS(fuse.Operations):
                 else:
                     st['st_size'] = len(ss[0].encode('utf-8'))
                 return st
-            st['st_mode']=stat.S_IFLNK | 0o777
-            st['st_nlink']=1
             # Set the date stuff on the link?  The user can always just
             # add `-L` to the ls command...
             imgname=pe[-1]
-            st['st_size'] = len(imgname)
-            # print(" IZImg ({0})".format(imgname))
             query="SELECT COUNT(*) FROM images WHERE image_name=?;"
             try:
                 self.cursor.execute(query, [imgname])
@@ -384,13 +380,32 @@ class InvokeOutFS(fuse.Operations):
             if cnt[0]<1:
                 # self.DBG("File not found.")
                 raise fuse.FuseOSError(errno.ENOENT)
+            # It's a link UNLESS we are working in real-file mode!
+            if getattr(self, 'real_files', False):
+                st['st_mode'] = stat.S_IFREG | 0o444
+                st['st_size'] = len(imgname)
+                # I guess go get the data from the real thing.  The metadata
+                # in the db doesn't have the size anyway.
+                fst = os.stat(self.imgfile(imgname))
+                # Let exceptions bubble up, I guess.
+                # reuse the inode number and stuff.  Oww, I have to do
+                # it by hand?  I refuse.
+                for k in ['st_ino', 'st_dev', 'st_uid', 'st_gid', 'st_size',
+                          'st_atime', 'st_mtime', 'st_ctime']:
+                    st[k] = fst[getattr(stat, k.upper())]
+            else:
+                st['st_mode']=stat.S_IFLNK | 0o777
+            st['st_nlink']=1
         return st
+
+    def imgfile(self, name):
+        return os.sep.join([self.rootdir, "outputs", "images", name])
 
     def readlink(self, filename):
         # print("RdLink: ({0!r} ({1!r})".format(filename, self.rootdir))
         pe = getParts(filename)
         name = pe[-1]
-        return os.sep.join([self.rootdir, "outputs", "images", name])
+        return self.imgfile(name)
 
     def listmodels(self, board, *, prompt=None):
         # Don't read from model_config; models might have been
@@ -646,6 +661,15 @@ class InvokeOutFS(fuse.Operations):
                 val = ss[0].encode('utf8')
             return val[offset:offset+size]
         else:
+            # In real_files mode, we do it for realz.
+            if getattr(self, 'real_files', False):
+                img = pe[-1]
+                imgfile = self.imgfile(img)
+                # Let exceptions bubble up?
+                with open(imgfile, "rb") as lfh:
+                    lfh.seek(offset)
+                    buf = lfh.read(size)
+                    return buf
             raise fuse.FuseOSError(errno.EBADF) # ?
 
     mknod = unlink = write = mkdir = release = open = truncate = utime = None

@@ -129,8 +129,14 @@ filters = {
                 },
     "_IMAGES": {"endquery": "SELECT image_name FROM ({})",
                 "midquery": None,
-                "variable": None
+                "variable": None,
                 },
+    # Maybe a shorthand?
+    "_I": {"endquery": "SELECT image_name FROM ({})",
+           "midquery": None,
+           "variable": None,
+           "invisible": True,
+           },
     # I need a special case for "this filter is next-to-last"
     # which isn't working so good, and we're better without.
     "_LAST": {
@@ -145,6 +151,23 @@ filters = {
         "endquery": ("""WITH RECURSIVE ser(x) AS (
             VALUES(10) UNION ALL SELECT x+10 FROM ser WHERE
             x<200) SELECT x FROM ser"""),
+        "invisible": True,
+    },
+    "_LIKE": {
+        # Another "penultimate" one.  Less clear how to do the intermediate
+        # (endquery) listing.
+        "midquery": ("SELECT * FROM ({}) WHERE positive_prompt LIKE "
+                     " ('%' || :like || '%')"),
+        "endquery": ("SELECT 'WORD'"), # No, you don't get hints.
+        "variable": "like",
+        "invisible": True,
+    },
+    # I think... it just goes like this, easy-peasy.
+    "_PROMPTS": {
+        "midquery": ("SELECT * FROM ({}) WHERE "
+                     "REPLACE(positive_prompt, '/', ' ') = :prompt"),
+        "endquery": ("SELECT DISTINCT REPLACE(positive_prompt, '/', ' ') FROM ({})"),
+        "variable": "prompt",
         "invisible": True,
     }
 }
@@ -458,6 +481,7 @@ class ChooseInvokeFS(fuse.Operations):
             return
         else:
             query = fil['endquery'].format(query)
+        # print(f"{query=}\n{vals=}")
         self.cursor.execute(query, vals)
         # found = False
         # Can I use something like "else" on the while for this?
@@ -468,6 +492,7 @@ class ChooseInvokeFS(fuse.Operations):
             if v is None:
                 yield NONE
             else:
+                # OK, this actually breaks when prompt strings are too long!
                 yield str(v)
         # if not found:
         #     raise fuse.FuseOSError(errno.ENOENT)

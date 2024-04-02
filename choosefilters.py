@@ -131,6 +131,22 @@ filters = {
                 "midquery": None,
                 "variable": None
                 },
+    # I need a special case for "this filter is next-to-last"
+    # which isn't working so good, and we're better without.
+    "_LAST": {
+        # "penultquery": ("SELECT image_name FROM ({}) "
+        #                 "ORDER BY created_at DESC LIMIT :last"),
+        # NO!!  This is a *grandparent* to images!
+        # Can't just leave midquery blank!
+        "midquery": ("SELECT * FROM ({}) ORDER BY "
+                     "created_at DESC LIMIT :last"),
+        "variable": "last",
+        # generate_series doesn't come with the sqlite3 library...
+        "endquery": ("""WITH RECURSIVE ser(x) AS (
+            VALUES(10) UNION ALL SELECT x+10 FROM ser WHERE
+            x<200) SELECT x FROM ser"""),
+        "invisible": True,
+    }
 }
 
 
@@ -174,7 +190,6 @@ class ChooseInvokeFS(fuse.Operations):
     def is_directory(self, path=None, pathelts=None):
         if not pathelts:
             pathelts=getParts(path)
-        # print(f"is_dir: {pathelts=}")
         # It's a directory unless its parent is "_IMAGES".
         # This is likely subject to change!
         if self.is_root(path, pathelts):
@@ -183,8 +198,17 @@ class ChooseInvokeFS(fuse.Operations):
             return True
         try:
             fil = filters[pathelts[-2]]
-            return bool(fil.get('midquery',None))
-        except KeyError:
+            return bool(fil.get('midquery', None))
+            # if not fil.get('midquery',None):
+            #     return False
+            # If grandparent has a penultquery, also a file,
+            # I think this makes sense?
+            # NO IT DOESN'T, because it'll break out on the KeyError
+            # above, and fixing that doesn't do good things.
+            # fil = filters[pathelts[-3]]
+            # if fil.get('penultquery', None):
+            #     return False
+        except (IndexError, KeyError):
             return True         # parent was not a filter level
 
     def getpromptnames(self):
@@ -346,48 +370,16 @@ class ChooseInvokeFS(fuse.Operations):
                     else:
                         yield r[0]
 
-    def listdates(self, **info):
-        # print(f"listdates({info=})")
-        # Just feed it in the info, okay?  Dates are different.
-        # I'm just going to ASSUME list_dates is True, why else are you
-        # calling this?
-        # print(f"listdates(**{info=})")
-        # This actually isn't QUITE accurate, since it doesn't take timezone
-        # vs UTC into account.  But that's close enough.
-        query = f"""SELECT DISTINCT DATE(created_at) FROM {ImageTbl} WHERE
-        (full_board_name = :board OR :board = '{ALL}' OR :board IS NULL) AND
-        IIF(:model IS NULL OR :model = '{ALL}', TRUE,
-            IIF(:model = '{NOMODEL}',
-                model_name IS NULL,
-                model_name = :model)) AND
-        IIF(:prompt IS NULL OR :prompt = '{ALL}', TRUE,
-            IIF(:prompt = '{NOPROMPT}',
-                positive_prompt IS NULL,
-                replace(positive_prompt, '/', ' ') = :prompt))
-        """
-        self.cursor.execute(query, {"board": info.get('board', None),
-                                    "model": info.get('model', None),
-                                    "prompt":
-                                    self.getprompt(info.get('promptname', None))})
-        while (batch := self.cursor.fetchmany()):
-               for r in batch:
-                   if not r or not r[0]:
-                       # XXXX RAISE ERROR?
-                       yield ""
-                   else:
-                       yield r[0]
-
     def readdir(self, path, offset):
         pe = getParts(path=path)
         # print(f"{pe=}")
         if not self.is_directory(pathelts=pe):
             raise fuse.FuseOSError(errno.ENOTDIR)
-        # Always yield '.' and '..'... but only after we're sure there's
-        # something!  We can't raise an exception after there has been
-        # something yielded, can we?  Do they always have to be first?
-        # Problem is that ENOENT doesn't seem to be happening.  Raising
-        # an ENOENT doesn't seem to show an error message with ls.
-        # I guess raise ENOTDIR since we're reading dirs anyway?
+        # ENOENT doesn't raise a proper error with ls, because
+        # getattr() doesn't fail to find it.  To fix that,
+        # getattr would have to run a db query for each entry,
+        # and that slows things down.  Better just to error
+        # with ENOTDIR.
         yield '.'
         yield '..'
 
@@ -451,16 +443,21 @@ class ChooseInvokeFS(fuse.Operations):
             if val == NONE:
                 val = None
             vals[fil['variable']] = val
-            # print(f"{query=}\n{vals=}")
             self.cursor.execute(f"SELECT COUNT(*) from ({query})", vals)
             row = self.cursor.fetchone()
             if row[0] <= 0:
                 raise fuse.FuseOSError(errno.ENOTDIR)
+            # if fil.get("penultquery", None):
+            #     query = fil['penultquery'].format(query)
+            #     val = pec[0]
+            #     if val == NONE:
+            #         val = None
+            #     vals[fil['variable']] = val
+            # else:
             yield from iter(active)
             return
         else:
             query = fil['endquery'].format(query)
-        # print(f"{query=}\n{vals=}")
         self.cursor.execute(query, vals)
         # found = False
         # Can I use something like "else" on the while for this?
@@ -471,7 +468,7 @@ class ChooseInvokeFS(fuse.Operations):
             if v is None:
                 yield NONE
             else:
-                yield v
+                yield str(v)
         # if not found:
         #     raise fuse.FuseOSError(errno.ENOENT)
         return

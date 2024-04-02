@@ -115,6 +115,18 @@ filters = {
                 # _BEFORE.
                 "variable": "date",
                 },
+    "_BEFORE" : {"endquery": "SELECT DISTINCT DATE(created_at) FROM ({})",
+                 "midquery": ("SELECT * FROM ({}) WHERE "
+                              "DATE(created_at) <= :before"),
+                 "variable": "before",
+                 "invisible": True,
+                 },
+    "_AFTER" : {"endquery": "SELECT DISTINCT DATE(created_at) FROM ({})",
+                "midquery": ("SELECT * FROM ({}) WHERE "
+                             "DATE(created_at) >= :after"),
+                "variable": "after",
+                "invisible": True,
+                },
     "_IMAGES": {"endquery": "SELECT image_name FROM ({})",
                 "midquery": None,
                 "variable": None
@@ -370,10 +382,20 @@ class ChooseInvokeFS(fuse.Operations):
         # print(f"{pe=}")
         if not self.is_directory(pathelts=pe):
             raise fuse.FuseOSError(errno.ENOTDIR)
+        # Always yield '.' and '..'... but only after we're sure there's
+        # something!  We can't raise an exception after there has been
+        # something yielded, can we?  Do they always have to be first?
+        # Problem is that ENOENT doesn't seem to be happening.  Raising
+        # an ENOENT doesn't seem to show an error message with ls.
+        # I guess raise ENOTDIR since we're reading dirs anyway?
         yield '.'
         yield '..'
+
         # build nested query, working from TOP DOWN, not bottom up!!.
-        active = list(filters.keys())
+        active = []
+        for k, v in filters.items():
+            if not v.get("invisible", False):
+                active.append(k)
         vals = {}
         query = ImageTbl        # innermost query goes to ImageTbl.
         if self.is_root(pathelts=pe):
@@ -397,8 +419,11 @@ class ChooseInvokeFS(fuse.Operations):
             try:
                 fil = filters[curr]
             except KeyError:
-                raise fuse.FuseOSError(errno.EBADF)
-            active.remove(curr)
+                raise fuse.FuseOSError(errno.ENOTDIR)
+            try:
+                active.remove(curr)
+            except ValueError:
+                pass
             # Other exceptions can bubble up for now?
             # Non-last, so we use the second query, and set the var.
             query = fil['midquery'].format(query)
@@ -412,41 +437,61 @@ class ChooseInvokeFS(fuse.Operations):
         try:
             fil = filters[curr]
         except KeyError:
-            raise fuse.FuseOSError(errno.EBADF)
-        active.remove(curr)
+            raise fuse.FuseOSError(errno.ENOTDIR)
+        try:
+            active.remove(curr)
+        except ValueError:
+            pass
         if pec:                 # Does there remain a value?
             # If so, then what I return is the remaining filters!!!
+            # UNLESS there is nothing there!
+            # Add the midquery here.
+            query = fil['midquery'].format(query)
+            val = pec[0]
+            if val == NONE:
+                val = None
+            vals[fil['variable']] = val
+            # print(f"{query=}\n{vals=}")
+            self.cursor.execute(f"SELECT COUNT(*) from ({query})", vals)
+            row = self.cursor.fetchone()
+            if row[0] <= 0:
+                raise fuse.FuseOSError(errno.ENOTDIR)
             yield from iter(active)
             return
         else:
             query = fil['endquery'].format(query)
-        print(f"{query=}\n{vals=}")
+        # print(f"{query=}\n{vals=}")
         self.cursor.execute(query, vals)
+        # found = False
+        # Can I use something like "else" on the while for this?
+        # Do we even want to raise this?  An empty dir is okay.
         while (row := self.cursor.fetchone()):
+            # found = True
             v = row[0]
             if v is None:
                 yield NONE
             else:
                 yield v
+        # if not found:
+        #     raise fuse.FuseOSError(errno.ENOENT)
         return
 
     def read(self, path, size, offset, fh):
         # What's the FH?
         pe = getParts(path)
-        info = self.parseelts(pe)
-        if info.get("is_dir", False):
+        if self.is_directory(pathelts=pe):
             raise fuse.FuseOSError(errno.EISDIR)
-        if info.get("promptname", None) and pe[-1] == PROMPT:
-            prompt = self.getprompt(info['promptname'])
-            bprompt = prompt.encode('utf8')
-            return bprompt[offset:offset+size]
+        # if info.get("promptname", None) and pe[-1] == PROMPT:
+        #     prompt = self.getprompt(info['promptname'])
+        #     bprompt = prompt.encode('utf8')
+        #     return bprompt[offset:offset+size]
         elif pe[-1].endswith(METADATA):
             img = pe[-1][:-len(METADATA)]
             self.cursor.execute("SELECT metadata FROM images WHERE image_name = ?;",
                                 [img])
             ss = self.cursor.fetchone()
             if ss is None:
-                raise fuse.FuseOSError(errno.EBADF)
+                raise fuse.FuseOSError(errno.ENOENT)
             # Could still have ss[0] being None.
             if ss[0] is None:
                 val = b""

@@ -95,29 +95,38 @@ NONE = "NONE"
 # for the filter and one for its value.
 
 filters = {
-    "_BOARDS": ("SELECT DISTINCT full_board_name FROM ({})",
-                "SELECT * FROM {} WHERE IIF(:board IS NULL, "
-                    "full_board_name IS NULL, "
-                    "full_board_name = :board)",
-                "board",        # name of variable
-                ),
-    "_MODELS": ("SELECT DISTINCT model_name FROM ({})",
-                "SELECT * FROM {} WHERE IIF(:model IS NULL,"
-                    "model_name IS NULL, "
-                    "model_name = :model)",
-                "model",
-                ),
-    "_IMAGES": ("SELECT image_name FROM ({})",
-                None,
-                None),
-    }
+    "_BOARDS": {"endquery": "SELECT DISTINCT full_board_name FROM ({})",
+                "midquery": ("SELECT * FROM ({}) WHERE IIF(:board IS NULL, "
+                             "full_board_name IS NULL, "
+                             "full_board_name = :board)"),
+                "variable": "board",
+                },
+    "_MODELS": {"endquery": "SELECT DISTINCT model_name FROM ({})",
+                "midquery": ("SELECT * FROM ({}) WHERE IIF(:model IS NULL, "
+                             "model_name IS NULL, "
+                             "model_name = :model)"),
+                "variable": "model",
+                },
+    "_DATES" : {"endquery": "SELECT DISTINCT DATE(created_at) FROM ({})",
+                "midquery": ("SELECT * FROM ({}) WHERE IIF(:date IS NULL, "
+                             "created_at IS NULL, "
+                             "DATE(created_at) = :date)"),
+                # Maybe some way to specify a range?  Could do _AFTER and
+                # _BEFORE.
+                "variable": "date",
+                },
+    "_IMAGES": {"endquery": "SELECT image_name FROM ({})",
+                "midquery": None,
+                "variable": None
+                },
+}
 
 
 ImageTbl_cmd = f"""select images.*, board_images.board_id, board_name, coalesce(board_name, '{UNSORTED}') as full_board_name, json_extract(metadata, '$.positive_prompt') as positive_prompt, coalesce(json_extract(metadata, '$.model.model_name'), models.name, json_extract(metadata, '$.model.key')) as model_name from images left join board_images on images.image_name=board_images.image_name left join boards on board_images.board_id=boards.board_id left join models on json_extract(metadata, '$.model.key')=models.id"""
 
 ImageTbl = "all_images_boards"
 
-class InvokeOutFS(fuse.Operations):
+class ChooseInvokeFS(fuse.Operations):
     def init(self, *args, **kwargs):
         self.dbfile = os.path.abspath(self.dbfile)
         try:
@@ -153,7 +162,7 @@ class InvokeOutFS(fuse.Operations):
     def is_directory(self, path=None, pathelts=None):
         if not pathelts:
             pathelts=getParts(path)
-        print(f"is_dir: {pathelts=}")
+        # print(f"is_dir: {pathelts=}")
         # It's a directory unless its parent is "_IMAGES".
         # This is likely subject to change!
         if self.is_root(path, pathelts):
@@ -162,7 +171,7 @@ class InvokeOutFS(fuse.Operations):
             return True
         try:
             fil = filters[pathelts[-2]]
-            return bool(fil[1])
+            return bool(fil.get('midquery',None))
         except KeyError:
             return True         # parent was not a filter level
 
@@ -214,70 +223,72 @@ class InvokeOutFS(fuse.Operations):
             return st
         if self.is_directory(pathelts=pe):
             return st           # same as root, fine.
-        else:
+
+        st['st_mode'] = stat.S_IFREG | 0o444
+        st['st_nlink'] = 1
+        # Most of the rest of this should work mainly like the
+        # old invokefuse, though haven't worked out special-cases
+        # like PROMPT.TXT
+
+        # Special case!  The prompt text file!
+        # XXXX!!! Do the prompt text file?
+        # if pe[-1] == PROMPT:
+        #         promptname = info.get("promptname", None)
+        #         # If there's no promptname, let it fail later.
+        #         prompt = self.getprompt(promptname)
+        #         st['st_mode'] = stat.S_IFREG | 0o444
+        #         st['st_nlink'] = 1
+        #         # Careful!  It's the length IN BYTES!
+        #         st['st_size'] = len(prompt.encode('utf-8'))
+        #         return st
+
+        # Going to bother doing metadata files?
+        # if pe[-1].endswith(METADATA):
+        #     image = pe[-1][:-len(METADATA)]
+        #     query = "SELECT metadata FROM images WHERE image_name=?;"
+        #     self.cursor.execute(query, [image])
+        #     # Yes, this winds up fetching the data when statting and when
+        #     # reading.  Tough.
+        #     ss = self.cursor.fetchone()
+        #     if ss is None:
+        #         raise fuse.FuseOSError(errno.ENOENT)
+        #     st['st_mode'] = stat.S_IFREG | 0o444
+        #     st['st_nlink'] = 1
+        #     # ss[0] might still be None, though!
+        #     if ss[0] is None:
+        #         st['st_size'] = 0
+        #     else:
+        #         st['st_size'] = len(ss[0].encode('utf-8'))
+        #     return st
+        # Set the date stuff on the link?  The user can always just
+        # add `-L` to the ls command...
+        imgname=pe[-1]
+        query="SELECT COUNT(*) FROM images WHERE image_name=?;"
+        try:
+            self.cursor.execute(query, [imgname])
+            cnt=self.cursor.fetchone()
+        except Exception as e:
+            # self.DBG("Whoa, except getattr2: {0}".format(e))
+            cnt=[0]
+        if cnt[0]<1:
+            # self.DBG("File not found.")
+            raise fuse.FuseOSError(errno.ENOENT)
+        # It's a link UNLESS we are working in real-file mode!
+        if getattr(self, 'real_files', False):
             st['st_mode'] = stat.S_IFREG | 0o444
-            st['st_nlink'] = 1
-            # XXXXXX ~~~~  !!!!!!  Stuff goes here!
-            return st
-            # Special case!  The prompt text file!
-        if 0:                   # "comment" all this out!
-            if pe[-1] == PROMPT:
-                promptname = info.get("promptname", None)
-                # If there's no promptname, let it fail later.
-                prompt = self.getprompt(promptname)
-                st['st_mode'] = stat.S_IFREG | 0o444
-                st['st_nlink'] = 1
-                # Careful!  It's the length IN BYTES!
-                st['st_size'] = len(prompt.encode('utf-8'))
-                return st
-            # Otherwise, this is presumably an image file, so a soft link.
-            # UNLESS it's a metadata file!!!
-            if pe[-1].endswith(METADATA):
-                image = pe[-1][:-len(METADATA)]
-                query = "SELECT metadata FROM images WHERE image_name=?;"
-                self.cursor.execute(query, [image])
-                # Yes, this winds up fetching the data when statting and when
-                # reading.  Tough.
-                ss = self.cursor.fetchone()
-                if ss is None:
-                    raise fuse.FuseOSError(errno.ENOENT)
-                st['st_mode'] = stat.S_IFREG | 0o444
-                st['st_nlink'] = 1
-                # ss[0] might still be None, though!
-                if ss[0] is None:
-                    st['st_size'] = 0
-                else:
-                    st['st_size'] = len(ss[0].encode('utf-8'))
-                return st
-            # Set the date stuff on the link?  The user can always just
-            # add `-L` to the ls command...
-            imgname=pe[-1]
-            query="SELECT COUNT(*) FROM images WHERE image_name=?;"
-            try:
-                self.cursor.execute(query, [imgname])
-                cnt=self.cursor.fetchone()
-            except Exception as e:
-                # self.DBG("Whoa, except getattr2: {0}".format(e))
-                cnt=[0]
-            if cnt[0]<1:
-                # self.DBG("File not found.")
-                raise fuse.FuseOSError(errno.ENOENT)
-            # It's a link UNLESS we are working in real-file mode!
-            if getattr(self, 'real_files', False):
-                st['st_mode'] = stat.S_IFREG | 0o444
-                st['st_size'] = len(imgname)
-                # I guess go get the data from the real thing.  The metadata
-                # in the db doesn't have the size anyway.
-                fst = os.stat(self.imgfile(imgname))
-                # Let exceptions bubble up, I guess.
-                # reuse the inode number and stuff.  Oww, I have to do
-                # it by hand?  I refuse.
-                for k in ['st_ino', 'st_dev', 'st_uid', 'st_gid', 'st_size',
-                          'st_atime', 'st_mtime', 'st_ctime']:
-                    st[k] = fst[getattr(stat, k.upper())]
-            else:
-                st['st_mode']=stat.S_IFLNK | 0o777
-            st['st_nlink']=1
+            st['st_size'] = len(imgname)
+            # I guess go get the data from the real thing.  The metadata
+            # in the db doesn't have the size anyway.
+            fst = os.stat(self.imgfile(imgname))
+            # Let exceptions bubble up, I guess.
+            # reuse the inode number and stuff.  Oww, I have to do
+            # it by hand?  I refuse.
+            for k in ['st_ino', 'st_dev', 'st_uid', 'st_gid', 'st_size',
+                      'st_atime', 'st_mtime', 'st_ctime']:
+                st[k] = fst[getattr(stat, k.upper())]
+        else:
+            st['st_mode']=stat.S_IFLNK | 0o777
+        st['st_nlink']=1
         return st
 
     def imgfile(self, name):
@@ -288,7 +299,6 @@ class InvokeOutFS(fuse.Operations):
         pe = getParts(filename)
         name = pe[-1]
         return self.imgfile(name)
-
 
     def listprompts(self, board, *, model=None, hash=False, like=None):
         # As above, for prompts instead of models.  Let's say this yields
@@ -355,41 +365,9 @@ class InvokeOutFS(fuse.Operations):
                    else:
                        yield r[0]
 
-    def listimages(self, board, *, prompt=None, model=None, day=None):
-        # Use REAL PROMPT, and None vs NOMODEL and NOPROMPT as the others.
-        # Maybe can be a LITTLE more efficient.
-        # print(f"listimages({board=}, {prompt=}, {model=}, {day=})")
-        rprompt = rmodel = ""
-        restrict = "full_board_name=?"
-        query = f"""SELECT image_name FROM {ImageTbl} WHERE
-        (full_board_name = :board OR :board = '{ALL}' OR :board IS NULL) AND
-        IIF(:model IS NULL OR :model = '{ALL}', TRUE,
-            IIF(:model = '{NOMODEL}',
-                model_name IS NULL,
-                model_name = :model)) AND
-        IIF(:prompt IS NULL OR :prompt = '{ALL}', TRUE,
-            IIF(:prompt = '{NOPROMPT}',
-                positive_prompt IS NULL,
-                replace(positive_prompt,'/',' ') = :prompt)) AND
-        (DATE(created_at) = :day OR :day IS NULL)
-        """
-        if prompt:
-            prompt = prompt.replace('/', ' ')
-        self.cursor.execute(query, {"board":board,
-                                    "model":model,
-                                    "prompt":prompt,
-                                    "day":day})
-        while (batch := self.cursor.fetchmany()):
-               for r in batch:
-                   if not r or not r[0]:
-                       # XXXX RAISE ERROR?
-                       yield ""
-                   else:
-                       yield r[0]
-
     def readdir(self, path, offset):
         pe = getParts(path=path)
-        print(f"{pe=}")
+        # print(f"{pe=}")
         if not self.is_directory(pathelts=pe):
             raise fuse.FuseOSError(errno.ENOTDIR)
         yield '.'
@@ -423,32 +401,34 @@ class InvokeOutFS(fuse.Operations):
             active.remove(curr)
             # Other exceptions can bubble up for now?
             # Non-last, so we use the second query, and set the var.
-            query = fil[1].format(query)
+            query = fil['midquery'].format(query)
             val = pec.pop(0)
             if val == NONE:
                 val = None
-            vals[fil[2]] = val
+            vals[fil['variable']] = val
         # And now we're at the bottom, only one or two levels to go.
         # Should still be a key level.
         curr = pec.pop(0)
         try:
             fil = filters[curr]
         except KeyError:
-            raise fuse.FuseOSError(errno.BADF)
+            raise fuse.FuseOSError(errno.EBADF)
         active.remove(curr)
         if pec:                 # Does there remain a value?
             # If so, then what I return is the remaining filters!!!
             yield from iter(active)
             return
         else:
-            query = fil[0].format(query)
+            query = fil['endquery'].format(query)
         print(f"{query=}\n{vals=}")
         self.cursor.execute(query, vals)
         while (row := self.cursor.fetchone()):
-            yield row[0]
+            v = row[0]
+            if v is None:
+                yield NONE
+            else:
+                yield v
         return
-
-
 
     def read(self, path, size, offset, fh):
         # What's the FH?
@@ -507,7 +487,7 @@ def usage():
     """)
 
 if __name__ == '__main__':
-    server = InvokeOutFS()
+    server = ChooseInvokeFS()
     server.path = os.getcwd()
     # Simple parsing.  Maybe I should do better?
     if sys.argv[1] == "--help":
@@ -529,7 +509,9 @@ if __name__ == '__main__':
                 val = True
             setattr(server, nam, val)
     mntpt = os.path.abspath(sys.argv[1])
-    fu = fuse.FUSE(server, mntpt, foreground=getattr(server, 'foreground', False),
-                   nothreads=True, allow_other=getattr(server, 'allow_other', False),
+    fu = fuse.FUSE(server, mntpt,
+                   foreground=getattr(server, 'foreground', False),
+                   nothreads=True,
+                   allow_other=getattr(server, 'allow_other', False),
                    allow_root=getattr(server, 'allow_root', False))
 

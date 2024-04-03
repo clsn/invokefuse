@@ -90,6 +90,8 @@ METADATA = ".META"
 # Name for empty values
 NONE = "NONE"
 
+THISQUERY = "THISQUERY"
+
 # Filters.  To be applied as nested SQL queries.  Wait, nested?  Oh, that works
 # only if the nested queries select ALL the columns and only the last query
 # selects the individual item.  There are two queries for each filter, one
@@ -218,6 +220,8 @@ class ChooseInvokeFS(fuse.Operations):
         # filtering that isn't alternating FILTER/value.  Will need to make
         # building the query smarter too.
 
+        # Modifies pathelts DESTRUCTIVELY in one special case.
+
         # simple case:
         try:
             return self.filters[pathelts[0]]
@@ -264,7 +268,25 @@ class ChooseInvokeFS(fuse.Operations):
                 if matched:
                     return v
             # Other ways to match?
-        return None
+
+        # No longer chopping off top-level element anymore, so check
+        # this special case for the root and  DESTRUCTIVELY pop it
+        # off the pathelts, if nothing else matched.
+        if pathelts[0] == '' and len(pathelts) > 1:
+            if pathelts[1] in self.filters:
+                pathelts.pop(0)
+                return self.filters[pathelts[0]]
+
+        # if nothing, I mean nothing matches, I guess return something
+        # vacuous.  Then it'll work for getting, say, the top-level active
+        # filters at root or something, so we don't have to special-case
+        # root
+        return {
+            "midquery": "SELECT * FROM ({})",
+            "endquery": "SELECT full_board_name from ({})",
+            "variable": "x",
+            "consume": [1,1],
+        }
 
     def filter_consume(self, pe, fil, query, vals, active):
         # Given a filter and path elements, consume as much of the path
@@ -324,6 +346,8 @@ class ChooseInvokeFS(fuse.Operations):
     def is_directory(self, path=None, pathelts=None):
         if not pathelts:
             pathelts=getParts(path)
+        if pathelts[-1] == THISQUERY:
+            return False
         # It's a directory unless its parent is "_IMAGES".
         # This is likely subject to change!
         if self.is_root(path, pathelts):
@@ -412,24 +436,34 @@ class ChooseInvokeFS(fuse.Operations):
         #         st['st_size'] = len(prompt.encode('utf-8'))
         #         return st
 
-        # Going to bother doing metadata files?
-        # if pe[-1].endswith(METADATA):
-        #     image = pe[-1][:-len(METADATA)]
-        #     query = "SELECT metadata FROM images WHERE image_name=?;"
-        #     self.cursor.execute(query, [image])
-        #     # Yes, this winds up fetching the data when statting and when
-        #     # reading.  Tough.
-        #     ss = self.cursor.fetchone()
-        #     if ss is None:
-        #         raise fuse.FuseOSError(errno.ENOENT)
-        #     st['st_mode'] = stat.S_IFREG | 0o444
-        #     st['st_nlink'] = 1
-        #     # ss[0] might still be None, though!
-        #     if ss[0] is None:
-        #         st['st_size'] = 0
-        #     else:
-        #         st['st_size'] = len(ss[0].encode('utf-8'))
-        #     return st
+        if pe[-1] == THISQUERY:
+            import json
+            (query, vals, active) = self.buildquery(pe[:-1])
+            ss = json.dumps({"query": query, "vals": vals, "active": active},
+                            indent=4)
+            val = ss.encode('utf8')
+            st['st_mode'] = stat.S_IFREG | 0o444
+            st['st_nlink'] = 1
+            st['st_size'] = len(val)
+            return st
+
+        if pe[-1].endswith(METADATA):
+            image = pe[-1][:-len(METADATA)]
+            query = "SELECT metadata FROM images WHERE image_name=?;"
+            self.cursor.execute(query, [image])
+            # Yes, this winds up fetching the data when statting and when
+            # reading.  Tough.
+            ss = self.cursor.fetchone()
+            if ss is None:
+                raise fuse.FuseOSError(errno.ENOENT)
+            st['st_mode'] = stat.S_IFREG | 0o444
+            st['st_nlink'] = 1
+            # ss[0] might still be None, though!
+            if ss[0] is None:
+                st['st_size'] = 0
+            else:
+                st['st_size'] = len(ss[0].encode('utf-8'))
+            return st
         # Set the date stuff on the link?  The user can always just
         # add `-L` to the ls command...
         imgname=pe[-1]
@@ -516,10 +550,6 @@ class ChooseInvokeFS(fuse.Operations):
                 active.append(k)
         vals = {}
         query = f"SELECT * FROM {ImageTbl}" # innermost query goes to ImageTbl.
-        if self.is_root(pathelts=pe):
-            # XXXX!!!! This always returns the active filters,
-            # but I might want implied filters at the top!
-            return ("SELECT 1", {}, active)
         # OK, ok, calm down.  Building from the TOP DOWN is not the same
         # process for each level.  Deciding which query of the filter to
         # use depends ONLY on the LAST element, so it must be handled
@@ -529,7 +559,6 @@ class ChooseInvokeFS(fuse.Operations):
         # pe will always start with '' for the root dir.  So even numbers
         # means a key-level, odd numbers a value-level, though I will not
         # check that way...
-        pec.pop(0)              # pop off the root dir.
         while pec:
             fil = self.find_filter(pec)
             if not fil:
@@ -573,6 +602,14 @@ class ChooseInvokeFS(fuse.Operations):
     def read(self, path, size, offset, fh):
         # What's the FH?
         pe = getParts(path)
+        # Special debugging output!
+        if pe[-1] == THISQUERY:
+            import json
+            (query, vals, active) = self.buildquery(pe[:-1])
+            ss = json.dumps({"query": query, "vals": vals, "active": active},
+                            indent=4)
+            val = ss.encode('utf8')
+            return val[offset:offset+size]
         if self.is_directory(pathelts=pe):
             raise fuse.FuseOSError(errno.EISDIR)
         # if info.get("promptname", None) and pe[-1] == PROMPT:

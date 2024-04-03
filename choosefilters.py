@@ -29,9 +29,10 @@ from functools import update_wrapper
 
 def debugf(func):
     def f(self, *args, **kwargs):
-        print(f"Entering {f.__name__}({args!r}, {kwargs!r})")
+        # print(f"Entering {f.__name__}({args!r}, {kwargs!r})")
         rv = func(self, *args, **kwargs)
-        print(f"Returning {rv!r}")
+        #print(f"Returning from {f.__name__}: {rv!r}")
+        print(f"{f.__name__}({args!r}, {kwargs!r}) ->\n   {rv!r}")
         return rv
     update_wrapper(f, func)
     return f
@@ -100,12 +101,14 @@ FILTERS = {
                              "full_board_name IS NULL, "
                              "full_board_name = :board)"),
                 "variable": "board",
+                "visible" : True,
                 },
     "_MODELS": {"endquery": "SELECT DISTINCT model_name FROM ({})",
                 "midquery": ("SELECT * FROM ({}) WHERE IIF(:model IS NULL, "
                              "model_name IS NULL, "
                              "model_name = :model)"),
                 "variable": "model",
+                "visible" : True,
                 },
     "_DATES" : {"endquery": "SELECT DISTINCT DATE(created_at) FROM ({})",
                 "midquery": ("SELECT * FROM ({}) WHERE IIF(:date IS NULL, "
@@ -114,28 +117,29 @@ FILTERS = {
                 # Maybe some way to specify a range?  Could do _AFTER and
                 # _BEFORE.
                 "variable": "date",
+                "visible" : True,
                 },
     "_BEFORE" : {"endquery": "SELECT DISTINCT DATE(created_at) FROM ({})",
                  "midquery": ("SELECT * FROM ({}) WHERE "
                               "DATE(created_at) <= :before"),
                  "variable": "before",
-                 "invisible": True,
                  },
     "_AFTER" : {"endquery": "SELECT DISTINCT DATE(created_at) FROM ({})",
                 "midquery": ("SELECT * FROM ({}) WHERE "
                              "DATE(created_at) >= :after"),
                 "variable": "after",
-                "invisible": True,
                 },
     "_IMAGES": {"endquery": "SELECT image_name FROM ({})",
                 "midquery": None,
                 "variable": None,
+                "visible" : True,
+                "consume" : [1,1],
                 },
     # Maybe a shorthand?
     "_I": {"endquery": "SELECT image_name FROM ({})",
            "midquery": None,
            "variable": None,
-           "invisible": True,
+           "consume": [1,1],
            },
     # I need a special case for "this filter is next-to-last"
     # which isn't working so good, and we're better without.
@@ -151,7 +155,6 @@ FILTERS = {
         "endquery": ("""WITH RECURSIVE ser(x) AS (
             VALUES(10) UNION ALL SELECT x+10 FROM ser WHERE
             x<200) SELECT x FROM ser"""),
-        "invisible": True,
     },
     "_LIKE": {
         # Another "penultimate" one.  Less clear how to do the intermediate
@@ -160,7 +163,6 @@ FILTERS = {
                      " ('%' || :like || '%')"),
         "endquery": ("SELECT 'WORD'"), # No, you don't get hints.
         "variable": "like",
-        "invisible": True,
     },
     # I think... it just goes like this, easy-peasy.
     "_PROMPTS": {
@@ -168,7 +170,6 @@ FILTERS = {
                      "REPLACE(positive_prompt, '/', ' ') = :prompt"),
         "endquery": ("SELECT DISTINCT REPLACE(positive_prompt, '/', ' ') FROM ({})"),
         "variable": "prompt",
-        "invisible": True,
     }
 }
 
@@ -209,7 +210,111 @@ class ChooseInvokeFS(fuse.Operations):
                 self.filters = next(yaml.full_load_all(fh))
 
     def destroy(self, *args, **kwargs):
-        pass
+        self.cursor.close()
+        self.connection.close()
+
+    def find_filter(self, pathelts):
+        # Find the appropriate filter at this level.  Motivation: allow for
+        # filtering that isn't alternating FILTER/value.  Will need to make
+        # building the query smarter too.
+
+        # simple case:
+        try:
+            return self.filters[pathelts[0]]
+        except KeyError:
+            pass
+        for k, v in self.filters.items():
+            # OK, keys of the form "/str/" are regexps, anchored at both ends
+            if re.match("/.*/$", k):
+                if re.match(f"{k[1:-1]}$", pathelts[-1]):
+                    return v
+            # What are some other possibilities?  Some kind of "match"
+            # property in the filter that can match up previous path
+            # elements?  Probably matching a *suffix* of them?  A list?  Or
+            # a glob-type string, maybe optionally starting with a / to
+            # make it "absolute" from the mounted root.  Glob-string seems
+            # more intuitive.  But probably only "*" and "**" recognized as
+            # glob chars, and even those only alone (not "x*y" or
+            # anything.)
+            if "matchpath" in v:
+                # Using / and not os.path.sep!
+                elts = v['matchpath'].split('/')
+                # I'm going to say that an ending slash is optional
+                if not elts[-1]:
+                    elts.pop()
+                def matches(m, p):
+                    return (m == "*") or (m == p)
+                # Not sure how to handle "**" yet.
+                matched = True
+                for p in reversed(pathelts):
+                    if not elts:
+                        break
+                    m = elts.pop()
+                    if not matches(m, p):
+                        matched = False
+                        break
+                if elts:
+                    # everything matched so far, but if there is more to
+                    # match still...
+                    matched = False
+                    # I think the "rooted" path will take care of itself,
+                    # since both pathelts and the match elements will start
+                    # with the empty string. (NO, BECAUSE THAT'S TRIMMED OFF
+                    # FIRST)
+                if matched:
+                    return v
+            # Other ways to match?
+        return None
+
+    def filter_consume(self, pe, fil, query, vals, active):
+        # Given a filter and path elements, consume as much of the path
+        # elements (from the top!) as required by the filter (DESTRUCTIVELY
+        # remove from pe param), update vals and active (DESTRUCTIVELY),
+        # and return new updated query.
+        #
+        # "Normal" filters named by their name (which is NOT in the fil
+        # param) consume up to 2 elements: one for themselves and one for
+        # their value.  "Implied" ones might consume only one.  I
+        # guess... let's be general. The "consume" element of the filter
+        # should be a 2-element list, the first element being the minimum
+        # number it consumes (there must be at least this many left), and
+        # the second being the maximum?  So the default is [1,2], and
+        # implied filters will be [0,1]?
+        consume = fil.get("consume", [1, 2])
+        eaten = []
+        # Modify pe to remove them
+        for _ in range(consume[0]):
+            eaten.append(pe.pop(0))
+            try:
+                active.remove(eaten[-1])
+            except ValueError:
+                pass
+        # In the normal case, consume[1] equals consume[0]+1.  I'm not
+        # entirely certain what to do if this isn't so.
+        newvals = []
+        try:
+            for _ in range(consume[1] - consume[0]):
+                val = pe.pop(0)
+                if val == NONE:
+                    val = None
+                newvals.append(val)
+                # apply the midquery if there is more
+                query = fil['midquery'].format(query)
+        except IndexError:
+            # Ran out of things to pop.  Apply the endquery
+            query = fil['endquery'].format(query)
+            # And empty out active.
+            active.clear()
+        # I need to check for this ALSO, as well as the consume [1,1]?
+        # apparently.  it's kludgy.
+        if not fil.get("midquery", None):
+            active.clear()
+        if newvals:
+            if len(newvals) == 1:
+                vals[fil['variable']] = newvals[0]
+            else:
+                vals[fil['variable']] = newvals # what happens now???
+        return query
 
     def is_root(self, path=None, pathelts=None):
         if pathelts is None:
@@ -399,6 +504,39 @@ class ChooseInvokeFS(fuse.Operations):
                     else:
                         yield r[0]
 
+
+    def buildquery(self, pe):
+        # Returns (query, vals, active); if the last is not empty
+        # then we're at a "key" level and are expected to yield
+        # those and not the results of the query.
+        # build nested query, working from TOP DOWN, not bottom up!!.
+        active = []
+        for k, v in self.filters.items():
+            if v.get("visible", False):
+                active.append(k)
+        vals = {}
+        query = f"SELECT * FROM {ImageTbl}" # innermost query goes to ImageTbl.
+        if self.is_root(pathelts=pe):
+            # XXXX!!!! This always returns the active filters,
+            # but I might want implied filters at the top!
+            return ("SELECT 1", {}, active)
+        # OK, ok, calm down.  Building from the TOP DOWN is not the same
+        # process for each level.  Deciding which query of the filter to
+        # use depends ONLY on the LAST element, so it must be handled
+        # specially!  Higher elements should always come in pairs, and
+        # we'll always use the second query!
+        pec = pe.copy()
+        # pe will always start with '' for the root dir.  So even numbers
+        # means a key-level, odd numbers a value-level, though I will not
+        # check that way...
+        pec.pop(0)              # pop off the root dir.
+        while pec:
+            fil = self.find_filter(pec)
+            if not fil:
+                raise fuse.FuseOSError(errno.ENOTDIR)
+            query = self.filter_consume(pec, fil, query, vals, active)
+        return (query, vals, active)
+
     def readdir(self, path, offset):
         pe = getParts(path=path)
         # print(f"{pe=}")
@@ -411,97 +549,25 @@ class ChooseInvokeFS(fuse.Operations):
         # with ENOTDIR.
         yield '.'
         yield '..'
-
-        # build nested query, working from TOP DOWN, not bottom up!!.
-        active = []
-        for k, v in self.filters.items():
-            if not v.get("invisible", False):
-                active.append(k)
-        vals = {}
-        query = ImageTbl        # innermost query goes to ImageTbl.
-        if self.is_root(pathelts=pe):
-            # SPECIAL CASE: root dir.  Yield the filters.
+        (query, vals, active) = self.buildquery(pe)
+        if active:              # At a "key" level
             yield from iter(active)
             return
-        # OK, ok, calm down.  Building from the TOP DOWN is not the same
-        # process for each level.  Deciding which query of the filter to
-        # use depends ONLY on the LAST element, so it must be handled
-        # specially!  Higher elements should always come in pairs, and
-        # we'll always use the second query!
-        pec = pe.copy()
-        # pe will always start with '' for the root dir.  So even numbers
-        # means a key-level, odd numbers a value-level, though I will not
-        # check that way...
-        pec.pop(0)              # pop off the root dir.
-        while len(pec) > 2:
-            # Things come in pairs until I'm down to the last one or
-            # two elements.  Should be straightforward.
-            curr = pec.pop(0)
-            try:
-                fil = self.filters[curr]
-            except KeyError:
-                raise fuse.FuseOSError(errno.ENOTDIR)
-            try:
-                active.remove(curr)
-            except ValueError:
-                pass
-            # Other exceptions can bubble up for now?
-            # Non-last, so we use the second query, and set the var.
-            query = fil['midquery'].format(query)
-            val = pec.pop(0)
-            if val == NONE:
-                val = None
-            vals[fil['variable']] = val
-        # And now we're at the bottom, only one or two levels to go.
-        # Should still be a key level.
-        curr = pec.pop(0)
-        try:
-            fil = self.filters[curr]
-        except KeyError:
-            raise fuse.FuseOSError(errno.ENOTDIR)
-        try:
-            active.remove(curr)
-        except ValueError:
-            pass
-        if pec:                 # Does there remain a value?
-            # If so, then what I return is the remaining filters!!!
-            # UNLESS there is nothing there!
-            # Add the midquery here.
-            query = fil['midquery'].format(query)
-            val = pec[0]
-            if val == NONE:
-                val = None
-            vals[fil['variable']] = val
+        # Is this a good idea?  I'm thinking maybe we shouldn't do this and
+        # just leave an empty dir.
+        if False:
             self.cursor.execute(f"SELECT COUNT(*) from ({query})", vals)
             row = self.cursor.fetchone()
             if row[0] <= 0:
                 raise fuse.FuseOSError(errno.ENOTDIR)
-            # if fil.get("penultquery", None):
-            #     query = fil['penultquery'].format(query)
-            #     val = pec[0]
-            #     if val == NONE:
-            #         val = None
-            #     vals[fil['variable']] = val
-            # else:
-            yield from iter(active)
-            return
-        else:
-            query = fil['endquery'].format(query)
-        # print(f"{query=}\n{vals=}")
         self.cursor.execute(query, vals)
-        # found = False
-        # Can I use something like "else" on the while for this?
-        # Do we even want to raise this?  An empty dir is okay.
         while (row := self.cursor.fetchone()):
-            # found = True
             v = row[0]
             if v is None:
                 yield NONE
             else:
                 # OK, this actually breaks when prompt strings are too long!
                 yield str(v)
-        # if not found:
-        #     raise fuse.FuseOSError(errno.ENOENT)
         return
 
     def read(self, path, size, offset, fh):

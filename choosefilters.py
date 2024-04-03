@@ -94,7 +94,7 @@ NONE = "NONE"
 # selects the individual item.  There are two queries for each filter, one
 # for the filter and one for its value.
 
-filters = {
+FILTERS = {
     "_BOARDS": {"endquery": "SELECT DISTINCT full_board_name FROM ({})",
                 "midquery": ("SELECT * FROM ({}) WHERE IIF(:board IS NULL, "
                              "full_board_name IS NULL, "
@@ -179,6 +179,7 @@ ImageTbl = "all_images_boards"
 
 class ChooseInvokeFS(fuse.Operations):
     def init(self, *args, **kwargs):
+        global FILTERS
         self.dbfile = os.path.abspath(self.dbfile)
         try:
             self.connection = sqlite.connect(self.dbfile)
@@ -201,6 +202,11 @@ class ChooseInvokeFS(fuse.Operations):
         if not getattr(self, 'imagesdir', None):
             self.imagesdir = os.sep.join([self.rootdir, "outputs", "images"])
         self.promptdict = {}
+        self.filters = FILTERS
+        if getattr(self, 'configfile', None):
+            import yaml
+            with open(self.configfile) as fh:
+                self.filters = next(yaml.full_load_all(fh))
 
     def destroy(self, *args, **kwargs):
         pass
@@ -220,7 +226,7 @@ class ChooseInvokeFS(fuse.Operations):
         if len(pathelts) <= 2:  # Top-level dirs
             return True
         try:
-            fil = filters[pathelts[-2]]
+            fil = self.filters[pathelts[-2]]
             return bool(fil.get('midquery', None))
             # if not fil.get('midquery',None):
             #     return False
@@ -228,7 +234,7 @@ class ChooseInvokeFS(fuse.Operations):
             # I think this makes sense?
             # NO IT DOESN'T, because it'll break out on the KeyError
             # above, and fixing that doesn't do good things.
-            # fil = filters[pathelts[-3]]
+            # fil = self.filters[pathelts[-3]]
             # if fil.get('penultquery', None):
             #     return False
         except (IndexError, KeyError):
@@ -408,7 +414,7 @@ class ChooseInvokeFS(fuse.Operations):
 
         # build nested query, working from TOP DOWN, not bottom up!!.
         active = []
-        for k, v in filters.items():
+        for k, v in self.filters.items():
             if not v.get("invisible", False):
                 active.append(k)
         vals = {}
@@ -432,7 +438,7 @@ class ChooseInvokeFS(fuse.Operations):
             # two elements.  Should be straightforward.
             curr = pec.pop(0)
             try:
-                fil = filters[curr]
+                fil = self.filters[curr]
             except KeyError:
                 raise fuse.FuseOSError(errno.ENOTDIR)
             try:
@@ -450,7 +456,7 @@ class ChooseInvokeFS(fuse.Operations):
         # Should still be a key level.
         curr = pec.pop(0)
         try:
-            fil = filters[curr]
+            fil = self.filters[curr]
         except KeyError:
             raise fuse.FuseOSError(errno.ENOTDIR)
         try:

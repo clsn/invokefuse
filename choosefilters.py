@@ -136,12 +136,14 @@ FILTERS = {
                 "variable": None,
                 "visible" : True,
                 "consume" : [1,1],
+                "final": True,
                 },
     # Maybe a shorthand?
     "_I": {"endquery": "SELECT image_name FROM ({})",
            "midquery": None,
            "variable": None,
            "consume": [1,1],
+           "final": True,
            },
     # I need a special case for "this filter is next-to-last"
     # which isn't working so good, and we're better without.
@@ -230,7 +232,7 @@ class ChooseInvokeFS(fuse.Operations):
         for k, v in self.filters.items():
             # OK, keys of the form "/str/" are regexps, anchored at both ends
             if re.match("/.*/$", k):
-                if re.match(f"{k[1:-1]}$", pathelts[-1]):
+                if re.match(f"{k[1:-1]}$", pathelts[0]):
                     return v
             # What are some other possibilities?  Some kind of "match"
             # property in the filter that can match up previous path
@@ -240,6 +242,8 @@ class ChooseInvokeFS(fuse.Operations):
             # more intuitive.  But probably only "*" and "**" recognized as
             # glob chars, and even those only alone (not "x*y" or
             # anything.)
+            #
+            # XXX!!! THESE STILL ARE BACKWARD I THINK.
             if "matchpath" in v:
                 # Using / and not os.path.sep!
                 elts = v['matchpath'].split('/')
@@ -327,15 +331,19 @@ class ChooseInvokeFS(fuse.Operations):
             query = fil['endquery'].format(query)
             # And empty out active.
             active.clear()
+            # Should a query be "final" if endquery isn't run?  That
+            # is starting to make sense, but it doesn't quite work.
         # I need to check for this ALSO, as well as the consume [1,1]?
         # apparently.  it's kludgy.
         if not fil.get("midquery", None):
             active.clear()
-        if newvals:
+        if newvals and fil.get('variable', None):
             if len(newvals) == 1:
                 vals[fil['variable']] = newvals[0]
             else:
                 vals[fil['variable']] = newvals # what happens now???
+        if fil.get("final", False):
+            vals[' final '] = True
         return query
 
     def is_root(self, path=None, pathelts=None):
@@ -348,26 +356,9 @@ class ChooseInvokeFS(fuse.Operations):
             pathelts=getParts(path)
         if pathelts[-1] == THISQUERY:
             return False
-        # It's a directory unless its parent is "_IMAGES".
-        # This is likely subject to change!
-        if self.is_root(path, pathelts):
-            return True
-        if len(pathelts) <= 2:  # Top-level dirs
-            return True
-        try:
-            fil = self.filters[pathelts[-2]]
-            return bool(fil.get('midquery', None))
-            # if not fil.get('midquery',None):
-            #     return False
-            # If grandparent has a penultquery, also a file,
-            # I think this makes sense?
-            # NO IT DOESN'T, because it'll break out on the KeyError
-            # above, and fixing that doesn't do good things.
-            # fil = self.filters[pathelts[-3]]
-            # if fil.get('penultquery', None):
-            #     return False
-        except (IndexError, KeyError):
-            return True         # parent was not a filter level
+        # Build the query up but NOT including this
+        (query, vals, active) = self.buildquery(pathelts[:-1])
+        return not vals.get(' final ', False)
 
     def getpromptnames(self):
         # Populate/refresh the self.promptdict library.
@@ -579,6 +570,7 @@ class ChooseInvokeFS(fuse.Operations):
         yield '.'
         yield '..'
         (query, vals, active) = self.buildquery(pe)
+        final = vals.pop(" final ", False)
         if active:              # At a "key" level
             yield from iter(active)
             return

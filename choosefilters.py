@@ -217,7 +217,7 @@ class ChooseInvokeFS(fuse.Operations):
         self.cursor.close()
         self.connection.close()
 
-    def find_filter(self, pathelts):
+    def find_filter(self, pathelts, orig_pathelts=[]):
         # Find the appropriate filter at this level.  Motivation: allow for
         # filtering that isn't alternating FILTER/value.  Will need to make
         # building the query smarter too.
@@ -235,16 +235,30 @@ class ChooseInvokeFS(fuse.Operations):
                 if re.match(f"{k[1:-1]}$", pathelts[0]):
                     return v
             # What are some other possibilities?  Some kind of "match"
-            # property in the filter that can match up previous path
-            # elements?  Probably matching a *suffix* of them?  A list?  Or
-            # a glob-type string, maybe optionally starting with a / to
+            # property in the filter that can match up other path elements?
+            # Despite realizing more than once that I was building this
+            # query from the top down, I *still* wrote this working on
+            # previous elements as if building bottom-up, sigh.  Let's see
+            # if it can be made to make sense.
+
+            # So, a matching a PREfix of the FOLLOWING elements?  A list?
+            # Or a glob-type string, maybe optionally starting with a / to
             # make it "absolute" from the mounted root.  Glob-string seems
             # more intuitive.  But probably only "*" and "**" recognized as
             # glob chars, and even those only alone (not "x*y" or
             # anything.)
             #
+            # Or maybe I was on the right track in the first place, and
+            # should be looking at suffixes PRECEDING elements, in which
+            # case we're going to have to start passing in the "untrimmed"
+            # list as well instead of just working iteratively on the list
+            # being trimmed as we go.
+            #
             # XXX!!! THESE STILL ARE BACKWARD I THINK.
-            if "matchpath" in v:
+            #
+            # Really thinking matchpath really should be backward-looking,
+            # so adding another param, maybe change name to backmatchpath?
+            if "matchpath" in v and orig_pathelts:
                 # Using / and not os.path.sep!
                 elts = v['matchpath'].split('/')
                 # I'm going to say that an ending slash is optional
@@ -254,7 +268,7 @@ class ChooseInvokeFS(fuse.Operations):
                     return (m == "*") or (m == p)
                 # Not sure how to handle "**" yet.
                 matched = True
-                for p in reversed(pathelts):
+                for p in reversed(orig_pathelts):
                     if not elts:
                         break
                     m = elts.pop()
@@ -268,7 +282,7 @@ class ChooseInvokeFS(fuse.Operations):
                     # I think the "rooted" path will take care of itself,
                     # since both pathelts and the match elements will start
                     # with the empty string. (NO, BECAUSE THAT'S TRIMMED OFF
-                    # FIRST)
+                    # FIRST) (BUT NOT ANYMORE?)
                 if matched:
                     return v
             # Other ways to match?
@@ -428,10 +442,7 @@ class ChooseInvokeFS(fuse.Operations):
         #         return st
 
         if pe[-1] == THISQUERY:
-            import json
-            (query, vals, active) = self.buildquery(pe[:-1])
-            ss = json.dumps({"query": query, "vals": vals, "active": active},
-                            indent=4)
+            ss = self.thisquery(pe[:-1])
             val = ss.encode('utf8')
             st['st_mode'] = stat.S_IFREG | 0o444
             st['st_nlink'] = 1
@@ -551,7 +562,7 @@ class ChooseInvokeFS(fuse.Operations):
         # means a key-level, odd numbers a value-level, though I will not
         # check that way...
         while pec:
-            fil = self.find_filter(pec)
+            fil = self.find_filter(pec, orig_pathelts=pe)
             if not fil:
                 raise fuse.FuseOSError(errno.ENOTDIR)
             query = self.filter_consume(pec, fil, query, vals, active)
@@ -591,15 +602,19 @@ class ChooseInvokeFS(fuse.Operations):
                 yield str(v)
         return
 
+    def thisquery(self, pe):
+        import json
+        (query, vals, active) = self.buildquery(pe)
+        ss = json.dumps(dict(query=query, vals=vals, active=active, pathelts=pe),
+                        indent=4)
+        return ss
+
     def read(self, path, size, offset, fh):
         # What's the FH?
         pe = getParts(path)
         # Special debugging output!
         if pe[-1] == THISQUERY:
-            import json
-            (query, vals, active) = self.buildquery(pe[:-1])
-            ss = json.dumps({"query": query, "vals": vals, "active": active},
-                            indent=4)
+            ss = self.thisquery(pe[:-1])
             val = ss.encode('utf8')
             return val[offset:offset+size]
         if self.is_directory(pathelts=pe):

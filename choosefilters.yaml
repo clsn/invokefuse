@@ -50,4 +50,10 @@ _PROMPTS:
               REPLACE(positive_prompt, '/', ' ') = :prompt"
   endquery: "SELECT DISTINCT REPLACE(positive_prompt, '/', ' ') FROM ({})"
   variable: prompt
-
+_SIZE:
+  midquery: "SELECT * FROM ({}) WHERE
+              width = CAST(SUBSTR(:size, 1, INSTR(:size, 'x')-1) AS INTEGER) AND
+              height = CAST(SUBSTR(:size, INSTR(:size, 'x')+1) AS INTEGER)"
+  endquery: "SELECT CAST(width AS TEXT) || 'x' || CAST(height AS TEXT) FROM
+              (SELECT DISTINCT width, height FROM ({}))"
+  variable: size

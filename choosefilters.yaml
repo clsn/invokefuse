@@ -30,11 +30,13 @@ _IMAGES:
   variable: null
   visible: true
   consume: [1, 1]
+  final: true
 _I:
   endquery: "SELECT image_name FROM ({})"
   midquery: null
   variable: null
   consume: [1, 1]
+  final: true
 _LAST:
   midquery: "SELECT * FROM ({}) ORDER BY created_at DESC LIMIT :last"
   variable: last

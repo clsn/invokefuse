@@ -217,19 +217,25 @@ class ChooseInvokeFS(fuse.Operations):
         self.cursor.close()
         self.connection.close()
 
-    def find_filter(self, pathelts, orig_pathelts=[]):
+    def find_filter(self, pathelts, orig_pathelts=[], filters=None):
         # Find the appropriate filter at this level.  Motivation: allow for
         # filtering that isn't alternating FILTER/value.  Will need to make
         # building the query smarter too.
 
         # Modifies pathelts DESTRUCTIVELY in one special case.
 
+        if filters is None:
+            filters = self.filters
+
+        print(f"filters: {list(filters.keys())!r}")
+
         # simple case:
         try:
-            return self.filters[pathelts[0]]
+            return filters[pathelts[0]]
         except KeyError:
             pass
-        for k, v in self.filters.items():
+        with_priority = []
+        for k, v in filters.items():
             # OK, keys of the form "/str/" are regexps, anchored at both ends
             if re.match("/.*/$", k):
                 if re.match(f"{k[1:-1]}$", pathelts[0]):
@@ -258,7 +264,9 @@ class ChooseInvokeFS(fuse.Operations):
             #
             # Really thinking matchpath really should be backward-looking,
             # so adding another param, maybe change name to backmatchpath?
-            if "matchpath" in v and orig_pathelts:
+            #
+            # XXXXX DISABLING WITH IF False!
+            if False and "matchpath" in v and orig_pathelts:
                 # Using / and not os.path.sep!
                 elts = v['matchpath'].split('/')
                 # I'm going to say that an ending slash is optional
@@ -287,13 +295,29 @@ class ChooseInvokeFS(fuse.Operations):
                     return v
             # Other ways to match?
 
+            if "priority" in v:
+                for p in with_priority:
+                    if p["priority"] < v["priority"]:
+                        with_priority.remove(p)
+                # At the end, I have only things >= this one.
+                # If ==, then append this one anyway, and there's
+                # multiple ones.  I need only check the first, they
+                # should all be the same.
+                if ((not with_priority) or
+                        with_priority[0]['priority'] == v['priority']):
+                    with_priority.append(v)
+
+        if len(with_priority) == 1:
+            # A unique filter with highest priority
+            return with_priority[0]
+
         # No longer chopping off top-level element anymore, so check
         # this special case for the root and  DESTRUCTIVELY pop it
-        # off the pathelts, if nothing else matched.
+        # off the pathelts, if nothing else matched.  And then
+        # call recursively.
         if pathelts[0] == '' and len(pathelts) > 1:
-            if pathelts[1] in self.filters:
-                pathelts.pop(0)
-                return self.filters[pathelts[0]]
+            pathelts.pop(0)
+            return self.find_filter(pathelts, orig_pathelts, filters)
 
         # if nothing, I mean nothing matches, I guess return something
         # vacuous.  Then it'll work for getting, say, the top-level active
@@ -342,7 +366,7 @@ class ChooseInvokeFS(fuse.Operations):
                 query = fil['midquery'].format(query)
         except IndexError:
             # Ran out of things to pop.  Apply the endquery
-            query = fil['endquery'].format(query)
+            ## query = fil['endquery'].format(query)
             # And empty out active.
             active.clear()
             # Should a query be "final" if endquery isn't run?  That
@@ -550,6 +574,7 @@ class ChooseInvokeFS(fuse.Operations):
         for k, v in self.filters.items():
             if v.get("visible", False):
                 active.append(k)
+        filters = self.filters.copy() # So I can remove them as found.
         vals = {}
         query = f"SELECT * FROM {ImageTbl}" # innermost query goes to ImageTbl.
         # OK, ok, calm down.  Building from the TOP DOWN is not the same
@@ -561,11 +586,24 @@ class ChooseInvokeFS(fuse.Operations):
         # pe will always start with '' for the root dir.  So even numbers
         # means a key-level, odd numbers a value-level, though I will not
         # check that way...
+        fil = None              # So it's available afterward
         while pec:
-            fil = self.find_filter(pec, orig_pathelts=pe)
+            fil = self.find_filter(pec, orig_pathelts=pe, filters=filters)
             if not fil:
                 raise fuse.FuseOSError(errno.ENOTDIR)
             query = self.filter_consume(pec, fil, query, vals, active)
+            # Also have to remove from the filters... this is the wrong
+            # way to use dicts, sorry!
+            for k in list(filters.keys()): # don't iterate directly.
+                if filters[k] == fil:
+                    print(f"deleting filters[{k}]")
+                    del filters[k]
+        if not active:
+            # If the last filter was non-final apply its endquery.
+            # XXX!!! This should kinda be in filter_consume!!
+            if fil and not vals.get(" final ", False):
+                query = fil['endquery'].format(query)
+
         return (query, vals, active)
 
     def readdir(self, path, offset):

@@ -160,7 +160,7 @@ LIKE = "LIKE"
 # It's SOO much simpler just to make an "UNSORTED" board than to hassle
 # with the IS NULL situation.
 
-ImageTbl_cmd = f"""select images.*, board_images.board_id, board_name, coalesce(board_name, '{UNSORTED}') as full_board_name, json_extract(metadata, '$.positive_prompt') as positive_prompt, coalesce(json_extract(metadata, '$.model.model_name'), models.name, json_extract(metadata, '$.model.key')) as model_name from images left join board_images on images.image_name=board_images.image_name left join boards on board_images.board_id=boards.board_id left join models on json_extract(metadata, '$.model.key')=models.id"""
+ImageTbl_cmd = f"""select images.*, board_images.board_id, board_name, coalesce(board_name, '{UNSORTED}') as full_board_name, json_extract(metadata, '$.positive_prompt') as positive_prompt, coalesce(json_extract(metadata, '$.model.model_name'), models.name, json_extract(metadata, '$.model.key')) as model_name from images left join board_images on images.image_name=board_images.image_name left join boards on board_images.board_id=boards.board_id left join models on json_extract(metadata, '$.model.key')=models.id where is_intermediate is false"""
 
 ImageTbl = "all_images_boards"
 
@@ -292,11 +292,14 @@ class InvokeOutFS(fuse.Operations):
     def getpromptnames(self):
         # Populate/refresh the self.promptdict library.
         self.promptdict.clear()
+        # Oho!  It seems that sometimes the metadata is simply
+        # 'undefined', without quotes, which breaks json!
         self.cursor.execute("""select distinct
-                                replace(
-                                 json_extract(metadata,
+                                iif(metadata='undefined', NULL,
+                                    replace(
+                                        json_extract(metadata,
                                              '$.positive_prompt'),
-                                '/', ' ') from images;""")
+                                '/', ' ')) from images;""")
         while (batch := self.cursor.fetchmany()):
             for item in batch:
                 p = item[0]

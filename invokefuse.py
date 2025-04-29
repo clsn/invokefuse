@@ -292,14 +292,11 @@ class InvokeOutFS(fuse.Operations):
     def getpromptnames(self):
         # Populate/refresh the self.promptdict library.
         self.promptdict.clear()
-        # Oho!  It seems that sometimes the metadata is simply
-        # 'undefined', without quotes, which breaks json!
         self.cursor.execute("""select distinct
-                                iif(metadata='undefined', NULL,
-                                    replace(
-                                        json_extract(metadata,
+                                replace(
+                                 json_extract(metadata,
                                              '$.positive_prompt'),
-                                '/', ' ')) from images;""")
+                                '/', ' ') from images where is_intermediate is false;""")
         while (batch := self.cursor.fetchmany()):
             for item in batch:
                 p = item[0]

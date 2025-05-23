@@ -132,6 +132,10 @@ As with any mount type command, options for InvokeFuse go in the =-o= option:
 
  + =real_files= :: Standalone option.  Operate in "real files" mode.  Normally, the actual images are presented as symbolic links to the actual image files.  But it seems that Windows systems don't process symbolic links well, so the =real_files= option makes InvokeFuse try to present the images as actual files and handle reading from them, etc, so as to make it usable with Windows.  This may cause some small performance degradation, and there might also be other issues with it that we don't know about yet.
 
+ + =incl_all= :: Standalone option.  Make the [[*=ALL/=][ALL]] directories show up in the directory listing.  So your list of boards or models or prompts will /show/ the =ALL= subdirectory, rather than it just being available without being listed.
+
+ + =no_prompt= :: Standalone option.  Don't list the "PROMPT.TXT" file (though it is still available).  This way there'll be nothing but images in your lowest level, nothing but directories in your prompt level.
+
 ** Caveats
 
 This project was sort of thrown together, and there is a lot of error-checking and due diligence with inputs that is /not/ being done.  The user expected to use things correctly and not to provide opportunities for mishaps.

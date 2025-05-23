@@ -397,6 +397,14 @@ class InvokeOutFS(fuse.Operations):
                     st[k] = fst[getattr(stat, k.upper())]
             else:
                 st['st_mode']=stat.S_IFLNK | 0o777
+                # I can still set times and stuff right?
+                # I suppose I could just use ls -L for this,
+                # but still.
+                query = "SELECT unixepoch(created_at) FROM images WHERE image_name=?;"
+                self.cursor.execute(query, [imgname])
+                cdate, = self.cursor.fetchone()
+                for k in ['st_atime', 'st_mtime', 'st_ctime']:
+                    st[k] = cdate
             st['st_nlink']=1
         return st
 
@@ -569,6 +577,8 @@ class InvokeOutFS(fuse.Operations):
         if self.is_root(path=path):
             # Always yield the unsorted dir
             yield UNSORTED
+            if getattr(self, "incl_all", False):
+                yield ALL
             self.cursor.execute("SELECT DISTINCT board_name FROM boards;")
             l = self.cursor.fetchall()
             for r in l:
@@ -609,17 +619,22 @@ class InvokeOutFS(fuse.Operations):
                     # We're in the model tree at the bottom, need to
                     # output the PROMPT file too.
                     prompt = self.getprompt(promptname) # XXX exception here?
-                    yield PROMPT
+                    if not (hasattr(self, 'no_prompt') and getattr(self, 'no_prompt')):
+                        yield PROMPT
                     yield from self.listimages(board, model=model, prompt=prompt, day=day)
                 else:
                     # we know the model but not the prompts.  I think we
                     # *should* restrict to prompts that are actually found
                     # in that model.
+                    if getattr(self, 'incl_all', False):
+                        yield ALL
                     yield from self.listprompts(board, model=model, hash=True,
                                                 like=info['like'])
             else:
                 # We are in models tree, but don't know the model;
                 # have to list those.
+                if getattr(self, 'incl_all', False):
+                    yield ALL
                 yield from self.listmodels(board)
         elif info['tree'] == PROMPTS:
             if (prompt := info.get('promptname', None)):
@@ -632,9 +647,14 @@ class InvokeOutFS(fuse.Operations):
                 else:
                     # Have to list the models for this prompt.
                     # Also the PROMPT entry!
-                    yield PROMPT
+                    if not (hasattr(self, 'no_prompt') and getattr(self, 'no_prompt')):
+                        yield PROMPT
+                    if getattr(self, 'incl_all', False):
+                        yield ALL
                     yield from self.listmodels(board, prompt=prompt)
             else:
+                if getattr(self, 'incl_all', False):
+                    yield ALL
                 yield from self.listprompts(board, hash=True, like=info['like'])
 
     # I actually have to have a read() for the prompt and metadata
@@ -689,6 +709,8 @@ def usage():
     'imagesdir=ABSOLUTEPATH'   (where your images are)
     'rootdir=ABSOLUTEPATH'    (root dir for invoke)
     'real_files'  (emulate "real" files instead of symbolic links.)
+    'incl_all'   (list ALL explicitly in directories)
+    'no_prompt'   (omit {PROMPT} files from directories)
 
     If rootdir is not specified, it is taken to be one level above the directory
     where the dbfile is.  If imagesdir is not specified, it is taken to be

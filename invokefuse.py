@@ -221,6 +221,15 @@ class InvokeOutFS(fuse.Operations):
         # but it's happening?  Is it causing the problem?
         #if pathelts != [os.sep] and pathelts[0] != '':
         #    pathelts.insert(0, '')
+        # Is this reasonable, if redundant?  For handling
+        # LIKE/%pasta%/ALL?  I mean, special things don't HAVE to be
+        # at the assigned positions, do they?
+        try:
+            ind = pathelts.index(LIKE)
+            if ind < len(pathelts) - 1:
+                like = pathelts[ind + 1]
+        except ValueError:
+            pass
         # Special casing for dates?  Chop them off the end, too!
         if pathelts[-1] == DATES:
             # it's a dir, asking for the dates at whatever level.
@@ -239,6 +248,7 @@ class InvokeOutFS(fuse.Operations):
             # I think I'll require "like" to be on the next-to-bottom level.
             # You can never list a dir with LIKE, but it lists prompts
             # underneath it.
+            # What about .../LIKE/%pasta%/ALL ?
             like = pathelts[-1]
             is_dir = True
             # Chop them off the end.  No, only the LIKE part.
@@ -515,10 +525,10 @@ class InvokeOutFS(fuse.Operations):
                    else:
                        yield r[0]
 
-    def listimages(self, board, *, prompt=None, model=None, day=None):
+    def listimages(self, board, *, prompt=None, model=None, day=None, like=None):
         # Use REAL PROMPT, and None vs NOMODEL and NOPROMPT as the others.
         # Maybe can be a LITTLE more efficient.
-        # print(f"listimages({board=}, {prompt=}, {model=}, {day=})")
+        # print(f"listimages({board=}, {prompt=}, {model=}, {day=}, {like=})")
         rprompt = rmodel = ""
         restrict = "full_board_name=?"
         query = f"""SELECT image_name FROM {ImageTbl} WHERE
@@ -531,6 +541,7 @@ class InvokeOutFS(fuse.Operations):
             IIF(:prompt = '{NOPROMPT}',
                 positive_prompt IS NULL,
                 replace(positive_prompt,'/',' ') = :prompt)) AND
+        (positive_prompt LIKE :like OR :like IS NULL) AND
         (DATE(created_at) = :day OR :day IS NULL)
         """
         if prompt:
@@ -538,7 +549,8 @@ class InvokeOutFS(fuse.Operations):
         self.cursor.execute(query, {"board":board,
                                     "model":model,
                                     "prompt":prompt,
-                                    "day":day})
+                                    "day":day,
+                                    "like":like})
         while (batch := self.cursor.fetchmany()):
                for r in batch:
                    if not r or not r[0]:
@@ -621,7 +633,8 @@ class InvokeOutFS(fuse.Operations):
                     prompt = self.getprompt(promptname) # XXX exception here?
                     if not (hasattr(self, 'no_prompt') and getattr(self, 'no_prompt')):
                         yield PROMPT
-                    yield from self.listimages(board, model=model, prompt=prompt, day=day)
+                    yield from self.listimages(board, model=model, prompt=prompt, day=day,
+                                               like=info.get('like', None))
                 else:
                     # we know the model but not the prompts.  I think we
                     # *should* restrict to prompts that are actually found
@@ -643,7 +656,8 @@ class InvokeOutFS(fuse.Operations):
                 # Are we at the bottom now?
                 if (model := info.get('model', None)):
                     yield from self.listimages(board, model=model,
-                                               prompt=prompt, day=day)
+                                               prompt=prompt, day=day,
+                                               like=info.get('like', None))
                 else:
                     # Have to list the models for this prompt.
                     # Also the PROMPT entry!

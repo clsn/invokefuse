@@ -51,6 +51,7 @@ HASHLEN = 9                     # multiple of 3 means no =-padding.
 PROMPTLEN = 20
 import re
 SanityRE = re.compile('[^A-Za-z0-9_]+')
+NOPROMPT = 'NO PROMPT'
 def makehash(prompt):
     # Special-cases
     if prompt == NOPROMPT:
@@ -163,6 +164,8 @@ FILTERS = {
     "_LIKE": {
         # Another "penultimate" one.  Less clear how to do the intermediate
         # (endquery) listing.
+        # Hmm, OK, I think you have to say _LIKE/apricots/_PROMPTS which is annoying but
+        # also makes sense?
         "midquery": ("SELECT * FROM ({}) WHERE positive_prompt LIKE "
                      " ('%' || :like || '%')"),
         "endquery": ("SELECT 'WORD'"), # No, you don't get hints.
@@ -178,7 +181,7 @@ FILTERS = {
 }
 
 
-ImageTbl_cmd = f"""select images.*, board_images.board_id, board_name, coalesce(board_name, '{UNSORTED}') as full_board_name, json_extract(metadata, '$.positive_prompt') as positive_prompt, coalesce(json_extract(metadata, '$.model.model_name'), models.name, json_extract(metadata, '$.model.key')) as model_name from images left join board_images on images.image_name=board_images.image_name left join boards on board_images.board_id=boards.board_id left join models on json_extract(metadata, '$.model.key')=models.id"""
+ImageTbl_cmd = f"""select images.*, board_images.board_id, board_name, coalesce(board_name, '{UNSORTED}') as full_board_name, json_extract(metadata, '$.positive_prompt') as positive_prompt, coalesce(json_extract(metadata, '$.model.model_name'), models.name, json_extract(metadata, '$.model.key')) as model_name from images left join board_images on images.image_name=board_images.image_name left join boards on board_images.board_id=boards.board_id left join models on json_extract(metadata, '$.model.key')=models.id WHERE is_intermediate IS FALSE"""
 
 ImageTbl = "all_images_boards"
 
@@ -227,7 +230,7 @@ class ChooseInvokeFS(fuse.Operations):
         if filters is None:
             filters = self.filters
 
-        print(f"filters: {list(filters.keys())!r}")
+        # print(f"filters: {list(filters.keys())!r}")
 
         # simple case:
         try:
@@ -518,6 +521,13 @@ class ChooseInvokeFS(fuse.Operations):
                 st[k] = fst[getattr(stat, k.upper())]
         else:
             st['st_mode']=stat.S_IFLNK | 0o777
+            # Set dates on links.  I suppose could just use ls -L
+            # or just go with real_files mode, which is better.
+            query = "SELECT unixepoch(created_at) FROM images WHERE image_name=?;"
+            self.cursor.execute(query, [imgname])
+            cdate, = self.cursor.fetchone()
+            for k in ['st_atime', 'st_mtime', 'st_ctime']:
+                st[k] = cdate
         st['st_nlink']=1
         return st
 
@@ -596,7 +606,7 @@ class ChooseInvokeFS(fuse.Operations):
             # way to use dicts, sorry!
             for k in list(filters.keys()): # don't iterate directly.
                 if filters[k] == fil:
-                    print(f"deleting filters[{k}]")
+                    # print(f"deleting filters[{k}]")
                     del filters[k]
         if not active:
             # If the last filter was non-final apply its endquery.
@@ -701,6 +711,7 @@ def usage():
     'imagesdir=ABSOLUTEPATH'   (where your images are)
     'rootdir=ABSOLUTEPATH'    (root dir for invoke)
     'real_files'  (emulate "real" files instead of symbolic links.)
+    'configfile'  (absolute path for config .yaml file.)
 
     If rootdir is not specified, it is taken to be one level above the directory
     where the dbfile is.  If imagesdir is not specified, it is taken to be

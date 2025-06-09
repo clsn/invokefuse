@@ -180,7 +180,6 @@ FILTERS = {
     }
 }
 
-
 ImageTbl_cmd = f"""select images.*, board_images.board_id, board_name, coalesce(board_name, '{UNSORTED}') as full_board_name, json_extract(metadata, '$.positive_prompt') as positive_prompt, coalesce(json_extract(metadata, '$.model.model_name'), models.name, json_extract(metadata, '$.model.key')) as model_name from images left join board_images on images.image_name=board_images.image_name left join boards on board_images.board_id=boards.board_id left join models on json_extract(metadata, '$.model.key')=models.id WHERE is_intermediate IS FALSE"""
 
 ImageTbl = "all_images_boards"
@@ -408,7 +407,7 @@ class ChooseInvokeFS(fuse.Operations):
                                 replace(
                                  json_extract(metadata,
                                              '$.positive_prompt'),
-                                '/', ' ') from images;""")
+                                '/', ' ') from images where is_intermediate is false;""")
         while (batch := self.cursor.fetchmany()):
             for item in batch:
                 p = item[0]
@@ -643,7 +642,11 @@ class ChooseInvokeFS(fuse.Operations):
         self.cursor.execute(query, vals)
         while (row := self.cursor.fetchone()):
             v = row[0]
-            if v is None:
+            vv = str(v)
+            # prompts (in particular) can be NULL *or* they can be ''.
+            # We'll treat such things the same, and the config file will
+            # have to have the smarts to handle it.
+            if v is None or len(vv) == 0:
                 yield NONE
             else:
                 # OK, this actually breaks when prompt strings are too long!

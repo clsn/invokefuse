@@ -49,7 +49,7 @@ _LIKE:
   variable: like
 _PROMPTS:
   midquery: "SELECT * FROM ({}) WHERE
-              REPLACE(positive_prompt, '/', ' ') = :prompt"
+              COALESCE(REPLACE(positive_prompt, '/', ' '), '') = COALESCE(:prompt, '')"
   endquery: "SELECT DISTINCT REPLACE(positive_prompt, '/', ' ') FROM ({})"
   variable: prompt
 _SIZE:
@@ -59,3 +59,9 @@ _SIZE:
   endquery: "SELECT CAST(width AS TEXT) || 'x' || CAST(height AS TEXT) FROM
               (SELECT DISTINCT width, height FROM ({}))"
   variable: size
+_ASPECT:
+  midquery: "SELECT * FROM ({}) WHERE
+              ROUND(CAST(width AS FLOAT) / height, 4) = ROUND(CAST(:aspect AS FLOAT), 4)"
+  endquery: "SELECT CAST(aspect AS TEXT) FROM (SELECT DISTINCT ROUND(CAST(width AS FLOAT)/height, 4) aspect FROM ({}))"
+  variable: aspect
+  visible: false

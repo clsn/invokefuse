@@ -1,0 +1,61 @@
+_BOARDS :
+  endquery: "SELECT DISTINCT full_board_name FROM ({})"
+  midquery: "SELECT * FROM ({}) WHERE IIF(:board IS NULL,
+              full_board_name IS NULL, full_board_name = :board)"
+  variable: board
+  visible: true
+_MODELS:
+  endquery: "SELECT DISTINCT model_name FROM ({})"
+  midquery: "SELECT * FROM ({}) WHERE IIF(:model IS NULL,
+              model_name is NULL, model_name = :model)"
+  variable: model
+  visible: true
+_DATES:
+  endquery: "SELECT DISTINCT DATE(created_at) FROM ({})"
+  midquery: "SELECT * FROM ({}) WHERE IIF(:date IS NULL,
+              created_at IS NULL, DATE(created_at) = :date)"
+  variable: date
+  visible: true
+_BEFORE:
+  endquery: "SELECT DISTINCT DATE(created_at) FROM ({})"
+  midquery: "SELECT * FROM ({}) WHERE DATE(created_at) <= :before"
+  variable: before
+_AFTER:
+  endquery: "SELECT DISTINCT DATE(created_at) FROM ({})"
+  midquery: "SELECT * FROM ({}) WHERE DATE(created_at) >= :after"
+  variable: after
+_IMAGES:
+  endquery: "SELECT image_name FROM ({})"
+  midquery: null
+  variable: null
+  visible: true
+  consume: [1, 1]
+  final: true
+_I:
+  endquery: "SELECT image_name FROM ({})"
+  midquery: null
+  variable: null
+  consume: [1, 1]
+  final: true
+_LAST:
+  midquery: "SELECT * FROM ({}) ORDER BY created_at DESC LIMIT :last"
+  variable: last
+  endquery: "WITH RECURSIVE ser(x) AS (VALUES(10) UNION ALL
+              SELECT x+10 FROM ser WHERE x<200) SELECT x FROM ser"
+_LIKE:
+  midquery: "SELECT * FROM ({}) WHERE positive_prompt LIKE
+              ('%' || :like || '%')"
+  endquery: "SELECT 'WORD'"
+  variable: like
+_PROMPTS:
+  midquery: "SELECT * FROM ({}) WHERE
+              REPLACE(positive_prompt, '/', ' ') = :prompt"
+  endquery: "SELECT DISTINCT REPLACE(positive_prompt, '/', ' ') FROM ({})"
+  variable: prompt
+_SIZE:
+  midquery: "SELECT * FROM ({}) WHERE
+              width = CAST(SUBSTR(:size, 1, INSTR(:size, 'x')-1) AS INTEGER) AND
+              height = CAST(SUBSTR(:size, INSTR(:size, 'x')+1) AS INTEGER)"
+  endquery: "SELECT CAST(width AS TEXT) || 'x' || CAST(height AS TEXT) FROM
+              (SELECT DISTINCT width, height FROM ({}))"
+  variable: size
